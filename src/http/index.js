@@ -50,24 +50,36 @@ class HttpSurface {
     const path = url.pathname;
 
     if (req.method === 'GET' && (path === '/health' || path === '/status')) {
-      return this.json(res, 200, this.healthPayload());
+      const payload = this.healthPayload();
+      const code = payload.httpStatus || 200;
+      return this.json(res, code, payload);
     }
 
     if (req.method === 'GET' && path === '/') {
-      return this.html(res, landingPage(this.config));
+      this.deps.store?.recordFunnel('landing_view');
+      return this.html(
+        res,
+        landingPage(this.config, {
+          recent: this.deps.store?.recentAlerts(8) || [],
+          alerts24h: this.deps.store?.alertCount24h?.() || 0,
+        })
+      );
     }
 
     if (req.method === 'GET' && path === '/upgrade') {
+      this.deps.store?.recordFunnel('upgrade_view');
       return this.html(res, upgradePage(this.config));
     }
 
     if (req.method === 'POST' && path === '/api/checkout') {
       const body = await readJson(req);
+      this.deps.store?.recordFunnel('checkout_start', { rail: body.rail || 'stripe' });
       const session = await this.deps.revenue.createCheckoutSession(body);
       return this.json(res, 200, session);
     }
 
     if (req.method === 'GET' && path === '/checkout') {
+      this.deps.store?.recordFunnel('checkout_start', { rail: url.searchParams.get('rail') || 'stripe' });
       const session = await this.deps.revenue.createCheckoutSession({
         email: url.searchParams.get('email') || undefined,
         telegramHandle: url.searchParams.get('tg') || undefined,
@@ -79,6 +91,7 @@ class HttpSurface {
     }
 
     if (req.method === 'GET' && path === '/checkout/crypto') {
+      this.deps.store?.recordFunnel('checkout_start', { rail: 'crypto' });
       const session = await this.deps.revenue.createCheckoutSession({
         email: url.searchParams.get('email') || undefined,
         telegramHandle: url.searchParams.get('tg') || undefined,
@@ -90,6 +103,7 @@ class HttpSurface {
     }
 
     if (req.method === 'GET' && path === '/success') {
+      this.deps.store?.recordFunnel('checkout_success');
       return this.html(res, successPage(this.config));
     }
 
@@ -110,15 +124,22 @@ class HttpSurface {
   }
 
   healthPayload() {
+    const health = this.deps.health?.() || { ok: true, httpStatus: 200 };
     return {
-      status: 'ok',
+      status: health.ok ? 'ok' : 'degraded',
+      httpStatus: health.httpStatus || (health.ok ? 200 : 503),
       service: 'watchtower',
-      architecture: 'single-source-framework',
+      architecture: 'single-source-v2',
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
+      critical: health.critical,
+      degraded: health.degraded,
       memory: {
         rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
         heapMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        watchdog: this.deps.watchdog?.status?.(),
       },
+      priceFeed: this.deps.priceFeed?.status?.(),
+      store: this.deps.store?.status?.(),
       signals: this.deps.signals.status(),
       channels: this.deps.channels.status(),
       revenue: this.deps.revenue.getStats(),
@@ -152,13 +173,23 @@ async function readJson(req) {
   return JSON.parse(raw.toString('utf8'));
 }
 
-function landingPage(config) {
+function landingPage(config, extra = {}) {
   const brand = escapeHtml(config.brand);
   const price = config.stripe.monthlyUsd;
   const disclaimer = escapeHtml(config.legal.disclaimer);
   const cryptoEnabled = Boolean(
     config.cryptoRail.apiKey || config.cryptoRail.payUrl || config.cryptoRail.walletAddress
   );
+  const recent = (extra.recent || [])
+    .map(
+      (a) =>
+        `<li><span>${escapeHtml(a.type || '')}</span> ${escapeHtml(a.title || '')}</li>`
+    )
+    .join('');
+  const proof =
+    extra.alerts24h > 0
+      ? `<p class="proof">${extra.alerts24h} alerts in the last 24h</p><ul class="feed">${recent}</ul>`
+      : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -183,18 +214,23 @@ function landingPage(config) {
     a.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
     .meta, .legal { margin-top:2.5rem; padding-top:1.25rem; border-top:1px solid var(--line);
       color:var(--muted); font-size:.85rem; line-height:1.45; max-width:40rem; }
+    .proof { margin-top:2rem; font-size:.95rem; }
+    .feed { list-style:none; padding:0; margin:.5rem 0 0; color:var(--muted); font-size:.9rem; }
+    .feed li { padding:.35rem 0; border-bottom:1px solid var(--line); }
+    .feed span { color:var(--accent); text-transform:uppercase; font-size:.7rem; margin-right:.5rem; }
   </style>
 </head>
 <body>
   <main>
     <h1 class="brand">${brand}</h1>
-    <p>Market data alerts on Telegram &amp; X. Premium feed unlocks the same day you deploy — one process on Oracle Always Free.</p>
+    <p>Cross-venue funding, liquidation cascades, and sub-second market moves — delivered before the free bots refresh CoinGecko.</p>
     <div class="cta">
       <a class="btn primary" href="/checkout">Premium — $${price}/mo</a>
       ${cryptoEnabled ? `<a class="btn ghost" href="/checkout/crypto">Pay with crypto</a>` : ''}
       <a class="btn ghost" href="/upgrade">How it works</a>
     </div>
-    <p class="meta">Signals → channels → billing · drop-in plugins · Stripe primary, crypto fallback</p>
+    ${proof}
+    <p class="meta">v2 · WSS prices · edge signals · SQLite history · Stripe + crypto</p>
     <p class="legal">${disclaimer}</p>
   </main>
 </body>
