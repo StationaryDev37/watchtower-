@@ -1,31 +1,34 @@
-const axios = require('axios');
 const { SignalPlugin } = require('./base');
 
-/** CoinGecko % / volume spikes — commodity v1 adapter. Edge = next plugin. */
+/**
+ * Market moves from PriceFeed (Binance/Bybit WSS primary).
+ * Latency target: hundreds of ms vs CoinGecko's 30–60s poll ceiling.
+ */
 class MarketSignal extends SignalPlugin {
-  constructor(config, log, bus) {
+  constructor(config, log, bus, deps = {}) {
     super(config, log, bus);
     this.name = 'market';
+    this.priceFeed = deps.priceFeed || null;
     this.timer = null;
     this.lastPrices = new Map();
-    this.lastVolumes = new Map();
     this.lastPollAt = null;
     this.pollCount = 0;
   }
 
   async start() {
-    await this.tick();
+    const every = this.config.price.marketEvalSec * 1000;
     this.timer = setInterval(() => {
-      this.tick().catch((err) => this.log.error('Market tick failed', { error: err.message }));
-    }, this.config.pollIntervalSec * 1000);
-    // Don't keep the process alive solely for the timer during tests — PM2 owns lifetime
+      this.evaluateAll().catch((err) => this.log.error('Market eval failed', { error: err.message }));
+    }, every);
     if (this.timer.unref) this.timer.unref();
-    this.log.info('Market signal started', { coins: this.config.coins });
+    this.log.info('Market signal started (WSS-primary)', {
+      evalSec: this.config.price.marketEvalSec,
+      coins: this.config.coins,
+    });
   }
 
   async stop() {
     if (this.timer) clearInterval(this.timer);
-    this.timer = null;
   }
 
   status() {
@@ -34,82 +37,73 @@ class MarketSignal extends SignalPlugin {
       lastPollAt: this.lastPollAt,
       pollCount: this.pollCount,
       tracked: this.lastPrices.size,
+      feedLive: this.priceFeed?.isLive?.() || false,
     };
   }
 
-  headers() {
-    const h = { Accept: 'application/json' };
-    if (this.config.coingecko.apiKey) h['x-cg-demo-api-key'] = this.config.coingecko.apiKey;
-    return h;
-  }
-
-  async tick() {
-    const ids = this.config.coins.join(',');
-    const { data } = await axios.get(`${this.config.coingecko.baseUrl}/coins/markets`, {
-      params: {
-        vs_currency: 'usd',
-        ids,
-        order: 'market_cap_desc',
-        per_page: 50,
-        page: 1,
-        sparkline: false,
-        price_change_percentage: '1h,24h',
-      },
-      headers: this.headers(),
-      timeout: 20000,
-    });
-
+  async evaluateAll() {
+    if (!this.priceFeed) return;
     this.lastPollAt = new Date().toISOString();
     this.pollCount += 1;
-
-    for (const coin of data) {
-      await this.evaluate(coin);
+    for (const coinId of this.config.coins) {
+      const symbol = coinIdToUsdt(coinId);
+      const tick = this.priceFeed.get(symbol);
+      if (!tick?.price) continue;
+      await this.evaluate(coinId, symbol, tick);
     }
   }
 
-  async evaluate(coin) {
-    const id = coin.id;
-    const price = Number(coin.current_price);
-    const vol = Number(coin.total_volume);
-    const change1h = Number(coin.price_change_percentage_1h_in_currency);
-    const change24h = Number(coin.price_change_percentage_24h_in_currency);
-    const prevPrice = this.lastPrices.get(id);
-    const prevVol = this.lastVolumes.get(id);
+  async evaluate(coinId, symbol, tick) {
+    const price = tick.price;
+    const prev = this.lastPrices.get(symbol);
+    this.lastPrices.set(symbol, price);
+    if (prev == null) return;
 
-    this.lastPrices.set(id, price);
-    this.lastVolumes.set(id, vol);
-    if (prevPrice == null) return;
-
-    const movePct = ((price - prevPrice) / prevPrice) * 100;
+    const movePct = ((price - prev) / prev) * 100;
     const absMove = Math.abs(movePct);
-    const volSpike = prevVol > 0 ? ((vol - prevVol) / prevVol) * 100 : 0;
+    const change1h = tick.change1h;
     const hitMove = absMove >= this.config.thresholds.priceMovePct;
-    const hitVol = volSpike >= this.config.thresholds.volumeSpikePct;
-    const hitHourly = Math.abs(change1h) >= this.config.thresholds.priceMovePct;
-    if (!hitMove && !hitVol && !hitHourly) return;
+    const hitHourly =
+      Number.isFinite(change1h) && Math.abs(change1h) >= this.config.thresholds.priceMovePct;
+    if (!hitMove && !hitHourly) return;
 
     const strong =
-      Math.abs(change1h) >= this.config.thresholds.priceMovePct * 2 ||
-      absMove >= this.config.thresholds.priceMovePct * 2;
+      absMove >= this.config.thresholds.priceMovePct * 2 ||
+      (Number.isFinite(change1h) && Math.abs(change1h) >= this.config.thresholds.priceMovePct * 2);
 
-    const direction = movePct >= 0 || change1h >= 0 ? 'UP' : 'DOWN';
+    const direction = movePct >= 0 ? 'UP' : 'DOWN';
     await this.emit({
       type: 'market',
+      source: tick.source,
+      coalesceKey: `market:${symbol}`,
       tier: strong ? 'premium' : 'public',
-      key: `market:${id}:${direction}`,
-      title: `${coin.symbol.toUpperCase()} ${direction} ${fmtPct(hitHourly ? change1h : movePct)}`,
-      body: `${coin.name} trades at $${fmtUsd(price)}. 24h: ${fmtPct(change24h)}.`,
-      url: `https://www.coingecko.com/en/coins/${id}`,
-      symbol: coin.symbol.toUpperCase(),
+      key: `market:${symbol}:${direction}`,
+      symbol,
+      title: `${symbol.replace('USDT', '')} ${direction} ${fmtPct(hitHourly ? change1h : movePct)}`,
+      body: `${tick.name || coinId} $${fmtUsd(price)} via ${tick.source}. 24h: ${fmtPct(tick.change24h)}.`,
+      url: `https://www.coingecko.com/en/coins/${coinId}`,
       fields: [
         { label: 'Price', value: `$${fmtUsd(price)}` },
+        { label: 'Source', value: tick.source },
         { label: '1h', value: fmtPct(change1h) },
-        { label: '24h', value: fmtPct(change24h) },
-        { label: 'Volume', value: `$${fmtUsd(vol)}` },
-        ...(hitVol ? [{ label: 'Vol spike', value: fmtPct(volSpike) }] : []),
+        { label: '24h', value: fmtPct(tick.change24h) },
       ],
     });
   }
+}
+
+function coinIdToUsdt(id) {
+  const map = {
+    bitcoin: 'BTCUSDT',
+    ethereum: 'ETHUSDT',
+    solana: 'SOLUSDT',
+    binancecoin: 'BNBUSDT',
+    ripple: 'XRPUSDT',
+    dogecoin: 'DOGEUSDT',
+    cardano: 'ADAUSDT',
+    'avalanche-2': 'AVAXUSDT',
+  };
+  return map[id] || `${String(id).slice(0, 4).toUpperCase()}USDT`;
 }
 
 function fmtPct(n) {
@@ -127,4 +121,4 @@ function fmtUsd(n) {
   return n.toPrecision(4);
 }
 
-module.exports = { MarketSignal };
+module.exports = { MarketSignal, coinIdToUsdt };

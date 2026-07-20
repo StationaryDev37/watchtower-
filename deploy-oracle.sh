@@ -59,6 +59,8 @@ if [[ -f watchtower-package.json && ! -f package.json ]]; then
 fi
 npm install --omit=dev
 
+mkdir -p "$INSTALL_DIR/data"
+
 echo "[6/7] Environment..."
 if [[ ! -f .env ]]; then
   cp .env.example .env

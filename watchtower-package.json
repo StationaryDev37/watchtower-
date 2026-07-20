@@ -1,6 +1,6 @@
 {
   "name": "watchtower",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Watchtower dependency manifest for Oracle Cloud deployment (mirrors package.json)",
   "main": "watchtower.js",
   "engines": {
@@ -8,9 +8,11 @@
   },
   "dependencies": {
     "axios": "^1.7.9",
+    "better-sqlite3": "^12.11.1",
     "dotenv": "^16.4.7",
     "ethers": "^6.13.4",
     "stripe": "^17.5.0",
-    "twitter-api-v2": "^1.18.2"
+    "twitter-api-v2": "^1.18.2",
+    "ws": "^8.21.1"
   }
 }
