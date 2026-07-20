@@ -1,11 +1,11 @@
 const axios = require('axios');
+const { SignalPlugin } = require('./base');
 
-class MarketSignal {
+/** CoinGecko % / volume spikes — commodity v1 adapter. Edge = next plugin. */
+class MarketSignal extends SignalPlugin {
   constructor(config, log, bus) {
+    super(config, log, bus);
     this.name = 'market';
-    this.config = config;
-    this.log = log;
-    this.bus = bus;
     this.timer = null;
     this.lastPrices = new Map();
     this.lastVolumes = new Map();
@@ -18,6 +18,8 @@ class MarketSignal {
     this.timer = setInterval(() => {
       this.tick().catch((err) => this.log.error('Market tick failed', { error: err.message }));
     }, this.config.pollIntervalSec * 1000);
+    // Don't keep the process alive solely for the timer during tests — PM2 owns lifetime
+    if (this.timer.unref) this.timer.unref();
     this.log.info('Market signal started', { coins: this.config.coins });
   }
 
@@ -91,16 +93,12 @@ class MarketSignal {
       absMove >= this.config.thresholds.priceMovePct * 2;
 
     const direction = movePct >= 0 || change1h >= 0 ? 'UP' : 'DOWN';
-    const title = `${coin.symbol.toUpperCase()} ${direction} ${fmtPct(hitHourly ? change1h : movePct)}`;
-    const body = `${coin.name} trades at $${fmtUsd(price)}. 24h: ${fmtPct(change24h)}.`;
-
-    await this.bus.publish({
+    await this.emit({
       type: 'market',
-      // Strong moves → premium tier (paid channel + free teaser)
       tier: strong ? 'premium' : 'public',
       key: `market:${id}:${direction}`,
-      title,
-      body,
+      title: `${coin.symbol.toUpperCase()} ${direction} ${fmtPct(hitHourly ? change1h : movePct)}`,
+      body: `${coin.name} trades at $${fmtUsd(price)}. 24h: ${fmtPct(change24h)}.`,
       url: `https://www.coingecko.com/en/coins/${id}`,
       symbol: coin.symbol.toUpperCase(),
       fields: [

@@ -1,47 +1,61 @@
-const Stripe = require('stripe');
+const { StripeRail } = require('./rails/stripe');
+const { CryptoRail } = require('./rails/crypto');
 
 /**
- * RevenueEngine — day-1 monetization in the same process as alerts.
- * Paths: Stripe Checkout (premium Telegram) + affiliate CTAs on every alert.
+ * RevenueEngine — payment rails + affiliate enrichment.
+ * Primary: Stripe. Fallback: crypto (NOWPayments / BTCPay / Solana Pay seam).
  */
 class RevenueEngine {
   constructor(config, log) {
     this.config = config;
     this.log = log;
-    this.stripe = null;
     this.alertCount = 0;
-    this.stats = {
-      checkouts: 0,
-      webhookEvents: 0,
-      affiliatesAttached: 0,
-      upgradesAttached: 0,
+    this.stats = { affiliatesAttached: 0, upgradesAttached: 0 };
+    this.rails = {
+      stripe: new StripeRail(config, log),
+      crypto: new CryptoRail(config, log),
     };
   }
 
   async start() {
-    if (this.config.stripe.secretKey) {
-      this.stripe = new Stripe(this.config.stripe.secretKey);
-      this.log.info('Stripe revenue path ready', {
-        priceId: Boolean(this.config.stripe.priceId),
-        monthlyUsd: this.config.stripe.monthlyUsd,
-      });
-    } else {
-      this.log.warn('STRIPE_SECRET_KEY missing — /upgrade checkout disabled until set');
-    }
+    await this.rails.stripe.start();
+    await this.rails.crypto.start();
+    this.log.info('Revenue rails', this.statusSummary());
   }
 
-  async stop() {}
+  async stop() {
+    await this.rails.stripe.stop();
+    await this.rails.crypto.stop();
+  }
+
+  primaryRail() {
+    return this.rails[this.config.payments.primary] || this.rails.stripe;
+  }
+
+  fallbackRail() {
+    return this.rails[this.config.payments.fallback] || this.rails.crypto;
+  }
 
   statusSummary() {
     return {
-      stripe: Boolean(this.config.stripe.secretKey),
+      primary: this.config.payments.primary,
+      fallback: this.config.payments.fallback,
+      stripe: this.rails.stripe.enabled,
+      crypto: this.rails.crypto.enabled,
       affiliate: this.config.affiliate.enabled && Boolean(this.config.affiliate.exchangeUrl),
       premiumInvite: Boolean(this.config.telegram.inviteLink),
     };
   }
 
   getStats() {
-    return { ...this.stats, ...this.statusSummary() };
+    return {
+      ...this.stats,
+      ...this.statusSummary(),
+      rails: {
+        stripe: this.rails.stripe.status(),
+        crypto: this.rails.crypto.status(),
+      },
+    };
   }
 
   upgradeUrl() {
@@ -53,6 +67,7 @@ class RevenueEngine {
     const monetization = {
       upgradeUrl: this.upgradeUrl(),
       tweetUpgradeUrl: this.config.growth.tweetUpgradeUrl || this.upgradeUrl(),
+      disclaimer: this.config.legal.shortDisclaimer,
     };
 
     if (
@@ -69,87 +84,42 @@ class RevenueEngine {
     return { ...alert, monetization };
   }
 
-  async createCheckoutSession({ email, telegramHandle } = {}) {
-    if (!this.stripe) {
-      const err = new Error('Stripe is not configured');
-      err.status = 503;
-      throw err;
+  async createCheckoutSession(opts = {}) {
+    const prefer = (opts.rail || this.config.payments.primary || 'stripe').toLowerCase();
+    const order = prefer === 'crypto'
+      ? [this.rails.crypto, this.rails.stripe]
+      : [this.primaryRail(), this.fallbackRail()];
+
+    let lastErr;
+    for (const rail of order) {
+      if (!rail?.enabled) continue;
+      try {
+        return await rail.createCheckout(opts);
+      } catch (err) {
+        lastErr = err;
+        this.log.warn(`${rail.name} checkout failed, trying next rail`, { error: err.message });
+      }
     }
-
-    const params = {
-      mode: 'subscription',
-      success_url: this.config.stripe.successUrl,
-      cancel_url: this.config.stripe.cancelUrl,
-      allow_promotion_codes: true,
-      metadata: {
-        product: 'watchtower_premium',
-        telegram_handle: telegramHandle || '',
-      },
-      subscription_data: {
-        metadata: {
-          product: 'watchtower_premium',
-          telegram_handle: telegramHandle || '',
-        },
-      },
-    };
-
-    if (email) params.customer_email = email;
-
-    if (this.config.stripe.priceId) {
-      params.line_items = [{ price: this.config.stripe.priceId, quantity: 1 }];
-    } else {
-      // Zero-config launch: create price inline so revenue works before dashboard setup
-      params.line_items = [
-        {
-          price_data: {
-            currency: 'usd',
-            unit_amount: Math.round(this.config.stripe.monthlyUsd * 100),
-            recurring: { interval: 'month' },
-            product_data: {
-              name: this.config.stripe.productName || `${this.config.brand} Premium`,
-              description: 'Premium whale + early volatility alerts via private Telegram',
-            },
-          },
-          quantity: 1,
-        },
-      ];
-    }
-
-    const session = await this.stripe.checkout.sessions.create(params);
-    this.stats.checkouts += 1;
-    this.log.info('Checkout session created', { id: session.id });
-    return session;
+    const err = lastErr || new Error('No payment rail available');
+    err.status = err.status || 503;
+    throw err;
   }
 
-  constructWebhookEvent(rawBody, signature) {
-    if (!this.stripe || !this.config.stripe.webhookSecret) {
-      const err = new Error('Stripe webhook not configured');
-      err.status = 503;
-      throw err;
-    }
-    return this.stripe.webhooks.constructEvent(
-      rawBody,
-      signature,
-      this.config.stripe.webhookSecret
-    );
+  async handleStripeWebhook(raw, headers) {
+    return this.rails.stripe.handleWebhook(raw, headers);
+  }
+
+  async handleCryptoWebhook(raw, headers) {
+    return this.rails.crypto.handleWebhook(raw, headers);
+  }
+
+  /** @deprecated use handleStripeWebhook — kept for older call sites */
+  constructWebhookEvent() {
+    throw new Error('Use handleStripeWebhook(raw, headers)');
   }
 
   async handleWebhook(event) {
-    this.stats.webhookEvents += 1;
-    this.log.info('Stripe webhook', { type: event.type, id: event.id });
-
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-      return {
-        type: 'checkout.session.completed',
-        email: session.customer_details?.email || session.customer_email,
-        telegramHandle: session.metadata?.telegram_handle,
-        inviteLink: this.config.telegram.inviteLink,
-        sessionId: session.id,
-      };
-    }
-
-    return { type: event.type, handled: true };
+    return event;
   }
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "watchtower",
-  "version": "2.0.0",
-  "description": "Single-source crypto alert framework — signals, channels, and Stripe revenue in one process on Oracle Cloud",
+  "version": "2.1.0",
+  "description": "Signals + delivery + subscription billing — Stripe primary, crypto fallback, drop-in plugins, Oracle Always Free",
   "main": "watchtower.js",
   "scripts": {
     "start": "node watchtower.js",

@@ -1,6 +1,6 @@
 {
   "name": "watchtower",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Watchtower dependency manifest for Oracle Cloud deployment (mirrors package.json)",
   "main": "watchtower.js",
   "engines": {

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * Watchtower Framework — single-source crypto alert + revenue engine
+ * Watchtower Framework — signals + delivery + subscription billing
  *
- * One process. One codebase. Free alerts + paid upgrades + affiliates.
- * Oracle Cloud Always Free → $0 infra. Revenue from day 1, not month 2–3.
+ * One process on Oracle Always Free (1 OCPU / 1 GB).
+ * Drop-in signal/channel plugins. Stripe primary, crypto payment fallback.
+ * Market-data / entertainment framing — not financial advice.
  */
 
 require('dotenv').config();

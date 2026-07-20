@@ -1,13 +1,17 @@
 const { ethers } = require('ethers');
+const { SignalPlugin } = require('./base');
 
 const ERC20_TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
-class WhaleSignal {
+/**
+ * WhaleSignal — watched-address ERC-20 transfers only.
+ * Refuses unfiltered Transfer subscriptions (will OOM a 1 GB Oracle box).
+ * This is commodity plumbing; replace/extend with edge plugins for paid retention.
+ */
+class WhaleSignal extends SignalPlugin {
   constructor(config, log, bus) {
+    super(config, log, bus);
     this.name = 'whale';
-    this.config = config;
-    this.log = log;
-    this.bus = bus;
     this.provider = null;
     this.running = false;
     this.seen = 0;
@@ -15,19 +19,33 @@ class WhaleSignal {
 
   async start() {
     if (!this.config.eth.rpcUrl) {
-      this.log.info('Whale signal idle — set ETH_RPC_URL to enable (premium differentiator)');
+      this.log.info('Whale signal idle — set ETH_RPC_URL + WATCH_ADDRESSES');
+      return;
+    }
+    if (!this.config.eth.watchAddresses.length) {
+      this.log.error('Whale signal refused: empty WATCH_ADDRESSES (memory safety)');
       return;
     }
 
     this.provider = new ethers.JsonRpcProvider(this.config.eth.rpcUrl);
     this.running = true;
-    this.provider.on({ topics: [ERC20_TRANSFER_TOPIC] }, (log) => {
-      this.handleLog(log).catch((err) =>
-        this.log.error('Whale handler failed', { error: err.message })
-      );
-    });
 
-    this.log.info('Whale signal subscribed', {
+    // Filter per watched address (from OR to) — never subscribe to all Transfers
+    for (const addr of this.config.eth.watchAddresses) {
+      const padded = ethers.zeroPadValue(ethers.getAddress(addr), 32);
+      this.provider.on({ topics: [ERC20_TRANSFER_TOPIC, padded] }, (log) => {
+        this.handleLog(log).catch((err) =>
+          this.log.error('Whale handler failed', { error: err.message })
+        );
+      });
+      this.provider.on({ topics: [ERC20_TRANSFER_TOPIC, null, padded] }, (log) => {
+        this.handleLog(log).catch((err) =>
+          this.log.error('Whale handler failed', { error: err.message })
+        );
+      });
+    }
+
+    this.log.info('Whale signal subscribed (filtered)', {
       watches: this.config.eth.watchAddresses.length,
     });
   }
@@ -42,6 +60,7 @@ class WhaleSignal {
       running: this.running,
       seen: this.seen,
       rpcConfigured: Boolean(this.config.eth.rpcUrl),
+      watches: this.config.eth.watchAddresses.length,
     };
   }
 
@@ -51,17 +70,13 @@ class WhaleSignal {
 
     const from = topicToAddress(raw.topics[1]);
     const to = topicToAddress(raw.topics[2]);
-    const watches = this.config.eth.watchAddresses.map((a) => a.toLowerCase());
-    if (watches.length && !watches.includes(from) && !watches.includes(to)) return;
-
     const value = BigInt(raw.data || '0x0');
     const amountApprox = Number(value) / 1e18;
     if (!Number.isFinite(amountApprox) || amountApprox < this.config.thresholds.whaleMinAmount) {
       return;
     }
 
-    // Whale alerts are the paid wedge — free channel gets teaser only
-    await this.bus.publish({
+    await this.emit({
       type: 'whale',
       tier: 'premium',
       key: `whale:${raw.transactionHash}:${raw.index}`,
@@ -74,7 +89,6 @@ class WhaleSignal {
         { label: 'Token', value: raw.address },
         { label: 'Tx', value: raw.transactionHash },
       ],
-      // Free channel still gets a redacted teaser via tier=premium (not premium-only)
       teaser: true,
     });
   }

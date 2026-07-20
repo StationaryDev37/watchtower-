@@ -1,16 +1,16 @@
-const { TelegramChannel } = require('./telegram');
-const { TwitterChannel } = require('./twitter');
-const { DiscordChannel } = require('./discord');
+const path = require('path');
+const { loadPlugins } = require('../plugins');
 
+/** Auto-loads channel plugins from this folder. */
 class ChannelRegistry {
   constructor(config, log) {
     this.config = config;
     this.log = log;
-    this.channels = [
-      new TelegramChannel(config, log),
-      new TwitterChannel(config, log),
-      new DiscordChannel(config, log),
-    ];
+    this.channels = loadPlugins(path.join(__dirname), {
+      exportNames: ['TelegramChannel', 'TwitterChannel', 'DiscordChannel', 'ChannelPlugin', 'default'],
+      config,
+      log,
+    });
   }
 
   listEnabled() {
@@ -18,15 +18,11 @@ class ChannelRegistry {
   }
 
   async start() {
-    for (const ch of this.channels) {
-      await ch.start();
-    }
+    for (const ch of this.channels) await ch.start();
   }
 
   async stop() {
-    for (const ch of this.channels) {
-      await ch.stop();
-    }
+    for (const ch of this.channels) await ch.stop();
   }
 
   status() {

@@ -1,15 +1,30 @@
-const { MarketSignal } = require('./market');
-const { WhaleSignal } = require('./whale');
+const path = require('path');
+const { loadPlugins } = require('../plugins');
 
+/**
+ * Auto-loads every *.js in this folder except index/base/_*.
+ * Enabled set comes from SIGNALS_ENABLED (comma list of plugin `name`s).
+ */
 class SignalRegistry {
   constructor(config, log, bus) {
     this.config = config;
     this.log = log;
     this.bus = bus;
     const enabled = new Set(config.signalsEnabled);
-    this.signals = [];
-    if (enabled.has('market')) this.signals.push(new MarketSignal(config, log, bus));
-    if (enabled.has('whale')) this.signals.push(new WhaleSignal(config, log, bus));
+    const all = loadPlugins(path.join(__dirname), {
+      exportNames: ['MarketSignal', 'WhaleSignal', 'SignalPlugin', 'default'],
+      config,
+      log,
+      extraArgs: [bus],
+    });
+    this.signals = all.filter((s) => enabled.has(s.name));
+    const skipped = all.filter((s) => !enabled.has(s.name)).map((s) => s.name);
+    if (skipped.length) {
+      this.log.info('Signals present but not enabled', { skipped, enabled: [...enabled] });
+    }
+    if (!this.signals.length) {
+      this.log.warn('No signals enabled — set SIGNALS_ENABLED=market (or whale, …)');
+    }
   }
 
   async start() {

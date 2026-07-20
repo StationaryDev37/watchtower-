@@ -1,31 +1,37 @@
 # Watchtower
 
-**Single-source crypto alert framework** — market + whale signals, Telegram / X / Discord, and Stripe premium in **one Node process**. Built for Oracle Cloud Always Free ($0 infra).
+Single-process **signals → delivery → subscription billing** framework for Oracle Always Free (1 OCPU / 1 GB).
 
-Revenue is not a month 2–3 project. Free alerts, `/checkout`, affiliate CTAs, and premium Telegram share the same codebase from minute one.
+Same shape as Alertatron / LunarCrush / paid TG channels: public market data in, Telegram/X/Discord out, premium gated by Stripe (crypto fallback). Revenue = subscribers × price − infra − fees — not magic.
 
-## Why this is fast
+## Reality checks (built into this repo)
 
-| Approach | Timeline |
-|---|---|
-| Separate bot + site + billing stack | Months of glue |
-| **Watchtower Framework** | Deploy in ~15 minutes, charge the same day |
+1. **Signal quality = retention.** `market` + `whale` are commodity adapters so the framework boots. Paid edges drop in as files under `src/signals/` (see `_example.funding.js`) without touching core.
+2. **Stripe freezes signal-adjacent merchants.** Framing is market-data / entertainment + disclaimers on every surface. `PAYMENT_FALLBACK=crypto` (NOWPayments / BTCPay / Solana Pay seam) so a freeze doesn’t nuke checkout.
+3. **X posts need taste, not spam.** Template layer (`src/templates/alerts.js`, `TWEET_STYLE`) — growth cadence is tuned after deploy, not hardcoded.
+
+## Architecture
 
 ```
-signals → AlertBus → channels + revenue enrichers → Telegram / X / Discord
-                              ↓
-                     HTTP: /checkout · /webhook/stripe
+watchtower.js
+ └─ WatchtowerFramework
+     ├─ signals/   (drop-in plugins)
+     ├─ bus        (cooldown + fan-out)
+     ├─ channels/  (telegram · twitter · discord)
+     ├─ revenue/   (Stripe rail + crypto rail + affiliates)
+     └─ http       :3847  /  /checkout  /checkout/crypto  /webhook/*  /health
 ```
 
-## Deploy on Oracle (3 commands)
+## Deploy (Oracle)
 
 ```bash
-ssh -i your_ssh_key ubuntu@YOUR_PUBLIC_IP
+ssh -i key ubuntu@IP
 curl -fsSL https://raw.githubusercontent.com/StationaryDev37/watchtower-/main/deploy-oracle.sh | bash
-cd ~/watchtower && nano .env && pm2 start watchtower.js --name watchtower && pm2 startup && pm2 save
+cd ~/watchtower && nano .env
+pm2 start watchtower.js --name watchtower && pm2 startup && pm2 save
 ```
 
-Full walkthrough: **[ORACLE_QUICKSTART.md](./ORACLE_QUICKSTART.md)**
+Details: [ORACLE_QUICKSTART.md](./ORACLE_QUICKSTART.md)
 
 ## Local
 
@@ -35,27 +41,7 @@ npm install
 DRY_RUN=true npm start
 ```
 
-## Day-1 monetization paths
-
-1. **Stripe Premium** — `GET /checkout` creates a Checkout Session; success page surfaces `TELEGRAM_PREMIUM_INVITE_LINK`.
-2. **Affiliate CTAs** — every alert can append `AFFILIATE_EXCHANGE_URL`.
-3. **Free → paid funnel** — public Telegram/X for growth; whale / strong moves hit the premium channel.
-
-## Layout
-
-```
-watchtower.js           # entry
-deploy-oracle.sh        # Oracle bootstrap
-watchtower-package.json # dependency mirror
-src/
-  framework.js          # orchestrator
-  bus.js                # in-process alert spine
-  config.js
-  channels/             # telegram · twitter · discord
-  signals/              # market · whale
-  revenue/              # Stripe + affiliates
-  http/                 # landing · checkout · webhook · health
-```
+Boot fails loud on load-bearing gaps when `STRICT_CONFIG=true` (default unless `DRY_RUN`).
 
 ## License
 

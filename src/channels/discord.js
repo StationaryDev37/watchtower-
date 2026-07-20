@@ -1,10 +1,11 @@
 const axios = require('axios');
+const { ChannelPlugin } = require('./base');
+const { formatDiscord } = require('../templates/alerts');
 
-class DiscordChannel {
+class DiscordChannel extends ChannelPlugin {
   constructor(config, log) {
+    super(config, log);
     this.name = 'discord';
-    this.config = config;
-    this.log = log;
     this.stats = { sent: 0, errors: 0 };
   }
 
@@ -20,8 +21,6 @@ class DiscordChannel {
     this.log.info('Discord channel ready');
   }
 
-  async stop() {}
-
   status() {
     return { enabled: this.enabled, ...this.stats };
   }
@@ -29,27 +28,9 @@ class DiscordChannel {
   async send(alert) {
     if (!this.enabled || alert.tier === 'premium-only') return false;
     try {
-      const fields = (alert.fields || []).slice(0, 6).map((f) => ({
-        name: f.label,
-        value: String(f.value).slice(0, 200),
-        inline: true,
-      }));
-      await axios.post(
-        this.config.discord.webhookUrl,
-        {
-          username: this.config.brand,
-          embeds: [
-            {
-              title: alert.title,
-              description: alert.body,
-              url: alert.monetization?.upgradeUrl || alert.url,
-              color: 0x0ea5e9,
-              fields,
-            },
-          ],
-        },
-        { timeout: 15000 }
-      );
+      await axios.post(this.config.discord.webhookUrl, formatDiscord(this.config, alert), {
+        timeout: 15000,
+      });
       this.stats.sent += 1;
       return true;
     } catch (err) {
