@@ -42,6 +42,28 @@ class Store {
         meta TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_funnel_ts ON funnel(ts);
+
+      CREATE TABLE IF NOT EXISTS solana_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER,
+        sig TEXT UNIQUE,
+        wallet TEXT,
+        kind TEXT,
+        sol_amount REAL,
+        token TEXT,
+        dex TEXT,
+        posted_free INTEGER DEFAULT 0,
+        posted_paid INTEGER DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_sol_events_ts ON solana_events(ts);
+      CREATE INDEX IF NOT EXISTS idx_sol_events_free ON solana_events(posted_free, ts);
+
+      CREATE TABLE IF NOT EXISTS wallet_stats (
+        wallet TEXT PRIMARY KEY,
+        hits INTEGER DEFAULT 0,
+        wins INTEGER DEFAULT 0,
+        last_seen INTEGER
+      );
     `);
     this.insertAlert = this.db.prepare(
       `INSERT INTO alerts (ts, type, tier, key, title, body, symbol, payload)
@@ -116,7 +138,75 @@ class Store {
       path: this.config.store.path,
       open: Boolean(this.db),
       alerts24h: this.alertCount24h(),
+      solanaEvents24h: this.solanaCount24h(),
     };
+  }
+
+  ensureSolanaTables() {
+    // Created in start(); method exists so signal can assert readiness
+    return Boolean(this.db);
+  }
+
+  insertSolanaEvent({ ts, sig, wallet, kind, solAmount, token, dex }) {
+    if (!this.db) return null;
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO solana_events (ts,sig,wallet,kind,sol_amount,token,dex)
+           VALUES (?,?,?,?,?,?,?)`
+        )
+        .run(ts, sig, wallet, kind, solAmount, token, dex);
+      return true;
+    } catch {
+      return false; // duplicate sig
+    }
+  }
+
+  bumpWallet(wallet, ts) {
+    if (!this.db || !wallet) return;
+    this.db
+      .prepare(
+        `INSERT INTO wallet_stats (wallet,hits,last_seen)
+         VALUES (?,1,?)
+         ON CONFLICT(wallet) DO UPDATE SET
+           hits=hits+1, last_seen=excluded.last_seen`
+      )
+      .run(wallet, ts);
+  }
+
+  markSolanaPosted(sig, lane) {
+    if (!this.db) return;
+    const col = lane === 'free' ? 'posted_free' : 'posted_paid';
+    this.db.prepare(`UPDATE solana_events SET ${col}=1 WHERE sig=?`).run(sig);
+  }
+
+  dueSolanaFree(cutoff, limit = 5) {
+    if (!this.db) return [];
+    return this.db
+      .prepare(
+        `SELECT * FROM solana_events WHERE posted_free=0 AND ts <= ? ORDER BY ts ASC LIMIT ?`
+      )
+      .all(cutoff, limit);
+  }
+
+  topWallets24h(limit = 5) {
+    if (!this.db) return [];
+    const since = Date.now() - 24 * 3600 * 1000;
+    return this.db
+      .prepare(
+        `SELECT wallet, hits FROM wallet_stats
+         WHERE last_seen > ? ORDER BY hits DESC LIMIT ?`
+      )
+      .all(since, limit);
+  }
+
+  solanaCount24h() {
+    if (!this.db) return 0;
+    const since = Date.now() - 24 * 3600 * 1000;
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM solana_events WHERE ts >= ?`)
+      .get(since);
+    return row?.c || 0;
   }
 }
 

@@ -1,15 +1,18 @@
 # Oracle quickstart — Watchtower v2 (edge + latency)
 
-## SIGNALS_ENABLED (recommended)
+## Solana whale (Helius)
 
 ```bash
-SIGNALS_ENABLED=market,funding,liquidations
-PRICE_BINANCE=true
-PRICE_BYBIT=true
-ALERT_COALESCE_MS=3000
-RSS_CEILING_MB=750
-SQLITE_PATH=$HOME/watchtower/data/watchtower.db
+SIGNALS_ENABLED=solana_whale
+HELIUS_KEY=...
+WHALE_SOL=500
+MEGA_SOL=2000
+PAID_LAG_MS=300000
+TELEGRAM_PREMIUM_CHAT_ID=...   # or TG_PAID_CHANNEL
+TELEGRAM_FREE_CHAT_ID=...      # or TG_CHANNEL
 ```
+
+Paid TG + X fire immediately; free TG is delayed 5 minutes. See [docs/SOLANA_WHALE.md](./docs/SOLANA_WHALE.md).
 
 ## Deploy
 
