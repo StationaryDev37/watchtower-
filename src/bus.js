@@ -40,7 +40,8 @@ class AlertBus {
   async publish(alert) {
     this.stats.published += 1;
     const cKey = this.coalesceKey(alert);
-    const windowMs = this.config.bus.coalesceMs;
+    const windowMs =
+      alert.coalesceMs != null ? alert.coalesceMs : this.config.bus.coalesceMs;
 
     if (windowMs <= 0) {
       return this.dispatch(alert);

@@ -6,10 +6,11 @@ v2 single-process **edge signals + fast delivery + subscription billing** for Or
 
 | Plugin | Edge |
 |---|---|
+| `solana_whale` | Helius Raydium/Orca swaps ≥ N SOL — paid TG + X immediate, free TG delayed 5m, daily wallet leaderboard |
 | `funding` | Cross-venue perp funding z-score + sign flips (Binance/Bybit/OKX) |
 | `liquidations` | Cascade detection on Binance/Bybit force-order streams |
 | `market` | Binance/Bybit WSS prices (~200ms), CoinGecko fallback only |
-| `whale` | Filtered watched-address transfers (opt-in) |
+| `whale` | Filtered ETH watched-address transfers (opt-in) |
 
 Held for later: `cex_flow`, `stables`, `new_pool` (support burden), conviction scoring (needs history).
 

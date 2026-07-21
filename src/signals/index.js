@@ -17,6 +17,7 @@ class SignalRegistry {
         'WhaleSignal',
         'FundingSignal',
         'LiquidationsSignal',
+        'SolanaWhaleSignal',
         'SignalPlugin',
         'default',
       ],

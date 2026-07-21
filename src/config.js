@@ -86,6 +86,15 @@ function loadConfig() {
       windowSec: num('LIQ_WINDOW_SEC', 60),
       thresholdUsd: num('LIQ_THRESHOLD_USD', 2_000_000),
     },
+    helius: {
+      apiKey: required('HELIUS_KEY') || required('HELIUS_API_KEY'),
+      whaleSol: num('WHALE_SOL', 500),
+      megaSol: num('MEGA_SOL', 2000),
+      freeLagMs: num('PAID_LAG_MS', 5 * 60 * 1000),
+      freeFlushSec: num('SOL_FREE_FLUSH_SEC', 30),
+      digestMs: num('SOL_DIGEST_MS', 24 * 60 * 60 * 1000),
+      maxInflight: num('HELIUS_MAX_INFLIGHT', 4),
+    },
     store: {
       path: required('SQLITE_PATH', `${process.env.HOME || '/tmp'}/watchtower/watchtower.db`),
     },
@@ -102,18 +111,23 @@ function loadConfig() {
       watchAddresses: list('WATCH_ADDRESSES').slice(0, num('MAX_WATCH_ADDRESSES', 25)),
     },
     telegram: {
-      botToken: required('TELEGRAM_BOT_TOKEN'),
-      freeChatId: required('TELEGRAM_FREE_CHAT_ID') || required('TELEGRAM_CHAT_ID'),
-      premiumChatId: required('TELEGRAM_PREMIUM_CHAT_ID'),
+      botToken:
+        required('TELEGRAM_BOT_TOKEN') || required('TG_BOT_TOKEN'),
+      freeChatId:
+        required('TELEGRAM_FREE_CHAT_ID') ||
+        required('TELEGRAM_CHAT_ID') ||
+        required('TG_CHANNEL'),
+      premiumChatId:
+        required('TELEGRAM_PREMIUM_CHAT_ID') || required('TG_PAID_CHANNEL'),
       opsChatId: required('TELEGRAM_OPS_CHAT_ID'),
       inviteLink: required('TELEGRAM_PREMIUM_INVITE_LINK'),
       minIntervalMs: num('TELEGRAM_MIN_INTERVAL_MS', 40),
     },
     twitter: {
-      apiKey: required('TWITTER_API_KEY'),
-      apiSecret: required('TWITTER_API_SECRET'),
-      accessToken: required('TWITTER_ACCESS_TOKEN'),
-      accessSecret: required('TWITTER_ACCESS_SECRET'),
+      apiKey: required('TWITTER_API_KEY') || required('X_API_KEY'),
+      apiSecret: required('TWITTER_API_SECRET') || required('X_API_SECRET'),
+      accessToken: required('TWITTER_ACCESS_TOKEN') || required('X_ACCESS_TOKEN'),
+      accessSecret: required('TWITTER_ACCESS_SECRET') || required('X_ACCESS_SECRET'),
     },
     discord: {
       webhookUrl: required('DISCORD_WEBHOOK_URL'),
@@ -187,6 +201,10 @@ function validateConfig(config) {
   const warnings = [];
 
   if (!config.publicBaseUrl) errors.push('PUBLIC_BASE_URL is required');
+
+  if (config.signalsEnabled.includes('solana_whale') && !config.helius.apiKey) {
+    errors.push('SIGNALS_ENABLED includes solana_whale but HELIUS_KEY is missing');
+  }
 
   if (config.signalsEnabled.includes('whale')) {
     if (!config.eth.rpcUrl) {
