@@ -30,10 +30,12 @@ class ChannelRegistry {
   }
 
   async dispatch(alert) {
+    const allow = Array.isArray(alert.channels) ? new Set(alert.channels) : null;
     const results = {};
     let sent = false;
     for (const ch of this.channels) {
       if (!ch.enabled) continue;
+      if (allow && !allow.has(ch.name)) continue;
       try {
         const ok = await ch.send(alert);
         results[ch.name] = ok;
