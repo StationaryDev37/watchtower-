@@ -1,126 +1,122 @@
-const axios = require('axios');
 const { SignalPlugin } = require('./base');
 
-/** CoinGecko % / volume spikes — commodity v1 adapter. Edge = next plugin. */
+/**
+ * Thin subscriber on PriceRouter spike events.
+ * Latency: WSS ticks → MAD-z → AlertBus (not CoinGecko poll).
+ */
 class MarketSignal extends SignalPlugin {
   constructor(config, log, bus) {
     super(config, log, bus);
     this.name = 'market';
-    this.timer = null;
-    this.lastPrices = new Map();
-    this.lastVolumes = new Map();
-    this.lastPollAt = null;
-    this.pollCount = 0;
+    this.priceRouter = null;
+    this.paused = false;
+    this.stats = { spikes: 0 };
+    this._onSpike = null;
+    this._onVol = null;
   }
 
   async start() {
-    await this.tick();
-    this.timer = setInterval(() => {
-      this.tick().catch((err) => this.log.error('Market tick failed', { error: err.message }));
-    }, this.config.pollIntervalSec * 1000);
-    // Don't keep the process alive solely for the timer during tests — PM2 owns lifetime
-    if (this.timer.unref) this.timer.unref();
-    this.log.info('Market signal started', { coins: this.config.coins });
+    if (!this.priceRouter) {
+      this.log.warn('market signal: PriceRouter not injected');
+      return;
+    }
+    this._onSpike = (ev) => {
+      if (this.paused) return;
+      this.handleSpike(ev).catch((err) =>
+        this.log.error('spike handle failed', { error: err.message })
+      );
+    };
+    this._onVol = (ev) => {
+      if (this.paused) return;
+      this.handleVol(ev).catch((err) =>
+        this.log.error('vol spike handle failed', { error: err.message })
+      );
+    };
+    this.priceRouter.on('spike', this._onSpike);
+    this.priceRouter.on('volume-spike', this._onVol);
+    this.log.info('Market signal subscribed to PriceRouter');
   }
 
   async stop() {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    if (this.priceRouter && this._onSpike) {
+      this.priceRouter.off('spike', this._onSpike);
+      this.priceRouter.off('volume-spike', this._onVol);
+    }
+  }
+
+  pause() {
+    this.paused = true;
+  }
+
+  resume() {
+    this.paused = false;
   }
 
   status() {
     return {
-      running: Boolean(this.timer),
-      lastPollAt: this.lastPollAt,
-      pollCount: this.pollCount,
-      tracked: this.lastPrices.size,
+      running: Boolean(this.priceRouter) && !this.paused,
+      paused: this.paused,
+      spikes: this.stats.spikes,
+      feed: this.priceRouter?.status?.(),
     };
   }
 
-  headers() {
-    const h = { Accept: 'application/json' };
-    if (this.config.coingecko.apiKey) h['x-cg-demo-api-key'] = this.config.coingecko.apiKey;
-    return h;
-  }
-
-  async tick() {
-    const ids = this.config.coins.join(',');
-    const { data } = await axios.get(`${this.config.coingecko.baseUrl}/coins/markets`, {
-      params: {
-        vs_currency: 'usd',
-        ids,
-        order: 'market_cap_desc',
-        per_page: 50,
-        page: 1,
-        sparkline: false,
-        price_change_percentage: '1h,24h',
-      },
-      headers: this.headers(),
-      timeout: 20000,
-    });
-
-    this.lastPollAt = new Date().toISOString();
-    this.pollCount += 1;
-
-    for (const coin of data) {
-      await this.evaluate(coin);
-    }
-  }
-
-  async evaluate(coin) {
-    const id = coin.id;
-    const price = Number(coin.current_price);
-    const vol = Number(coin.total_volume);
-    const change1h = Number(coin.price_change_percentage_1h_in_currency);
-    const change24h = Number(coin.price_change_percentage_24h_in_currency);
-    const prevPrice = this.lastPrices.get(id);
-    const prevVol = this.lastVolumes.get(id);
-
-    this.lastPrices.set(id, price);
-    this.lastVolumes.set(id, vol);
-    if (prevPrice == null) return;
-
-    const movePct = ((price - prevPrice) / prevPrice) * 100;
-    const absMove = Math.abs(movePct);
-    const volSpike = prevVol > 0 ? ((vol - prevVol) / prevVol) * 100 : 0;
-    const hitMove = absMove >= this.config.thresholds.priceMovePct;
-    const hitVol = volSpike >= this.config.thresholds.volumeSpikePct;
-    const hitHourly = Math.abs(change1h) >= this.config.thresholds.priceMovePct;
-    if (!hitMove && !hitVol && !hitHourly) return;
-
-    const strong =
-      Math.abs(change1h) >= this.config.thresholds.priceMovePct * 2 ||
-      absMove >= this.config.thresholds.priceMovePct * 2;
-
-    const direction = movePct >= 0 || change1h >= 0 ? 'UP' : 'DOWN';
+  async handleSpike(ev) {
+    this.stats.spikes += 1;
+    const dir = ev.z >= 0 ? 'UP' : 'DOWN';
+    const base = ev.symbol.replace(/USDT$/, '');
     await this.emit({
       type: 'market',
-      tier: strong ? 'premium' : 'public',
-      key: `market:${id}:${direction}`,
-      title: `${coin.symbol.toUpperCase()} ${direction} ${fmtPct(hitHourly ? change1h : movePct)}`,
-      body: `${coin.name} trades at $${fmtUsd(price)}. 24h: ${fmtPct(change24h)}.`,
-      url: `https://www.coingecko.com/en/coins/${id}`,
-      symbol: coin.symbol.toUpperCase(),
+      source: ev.source,
+      coalesceKey: `market:${ev.symbol}`,
+      symbol: ev.symbol,
+      tier: ev.tier,
+      degraded: ev.degraded,
+      entryPrice: ev.price,
+      features: {
+        z: Math.abs(ev.z),
+        zVol: Math.abs(ev.zVol || 0),
+        funding_dev: 0,
+        liq_asym: 0,
+      },
+      key: `market:${ev.symbol}:${dir}:${Math.round(ev.ts / 60000)}`,
+      title: `${base} ${dir} z=${ev.z.toFixed(2)}`,
+      body: `${base} $${fmtUsd(ev.price)} · MAD-z ${ev.z.toFixed(2)} via ${ev.source}${
+        ev.degraded ? ' · DEGRADED feed' : ''
+      }`,
       fields: [
-        { label: 'Price', value: `$${fmtUsd(price)}` },
-        { label: '1h', value: fmtPct(change1h) },
-        { label: '24h', value: fmtPct(change24h) },
-        { label: 'Volume', value: `$${fmtUsd(vol)}` },
-        ...(hitVol ? [{ label: 'Vol spike', value: fmtPct(volSpike) }] : []),
+        { label: 'Price', value: `$${fmtUsd(ev.price)}` },
+        { label: 'z', value: ev.z.toFixed(2) },
+        { label: 'zVol', value: Number.isFinite(ev.zVol) ? ev.zVol.toFixed(2) : 'n/a' },
+        { label: 'Source', value: ev.source },
+      ],
+    });
+  }
+
+  async handleVol(ev) {
+    const base = ev.symbol.replace(/USDT$/, '');
+    await this.emit({
+      type: 'market',
+      source: ev.source,
+      coalesceKey: `market:${ev.symbol}`,
+      symbol: ev.symbol,
+      tier: 'public',
+      degraded: ev.degraded,
+      entryPrice: ev.price,
+      features: { z: 0, zVol: Math.abs(ev.zVol), funding_dev: 0, liq_asym: 0 },
+      key: `mktvol:${ev.symbol}:${Math.round(ev.ts / 60000)}`,
+      title: `${base} volume spike zVol=${ev.zVol.toFixed(2)}`,
+      body: `Volume MAD-z ${ev.zVol.toFixed(2)} on ${base} via ${ev.source}`,
+      fields: [
+        { label: 'zVol', value: ev.zVol.toFixed(2) },
+        { label: 'Price', value: `$${fmtUsd(ev.price)}` },
       ],
     });
   }
 }
 
-function fmtPct(n) {
-  if (!Number.isFinite(n)) return 'n/a';
-  const sign = n > 0 ? '+' : '';
-  return `${sign}${n.toFixed(2)}%`;
-}
-
 function fmtUsd(n) {
   if (!Number.isFinite(n)) return 'n/a';
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
   if (n >= 1) return n.toFixed(2);
