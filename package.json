@@ -1,12 +1,14 @@
 {
   "name": "watchtower",
-  "version": "2.1.0",
-  "description": "Signals + delivery + subscription billing — Stripe primary, crypto fallback, drop-in plugins, Oracle Always Free",
+  "version": "3.0.0",
+  "description": "PR2 architectural pass — MAD-z prices, funding/liq edge, coalesce lanes, conviction, Oracle Always Free",
   "main": "watchtower.js",
   "scripts": {
     "start": "node watchtower.js",
     "dev": "DRY_RUN=true node watchtower.js",
-    "health": "curl -s http://127.0.0.1:3847/health"
+    "health": "curl -s http://127.0.0.1:3847/health",
+    "replay": "node scripts/replay.js",
+    "test": "node scripts/replay.js"
   },
   "engines": {
     "node": ">=18"

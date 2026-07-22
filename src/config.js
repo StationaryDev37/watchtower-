@@ -129,6 +129,7 @@ function loadConfig() {
       botToken: required('TELEGRAM_BOT_TOKEN'),
       freeChatId: required('TELEGRAM_FREE_CHAT_ID') || required('TELEGRAM_CHAT_ID'),
       premiumChatId: required('TELEGRAM_PREMIUM_CHAT_ID'),
+      opsChatId: required('TELEGRAM_OPS_CHAT_ID'),
       inviteLink: required('TELEGRAM_PREMIUM_INVITE_LINK'),
     },
     twitter: {

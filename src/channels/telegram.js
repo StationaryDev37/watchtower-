@@ -55,6 +55,20 @@ class TelegramChannel extends ChannelPlugin {
     };
   }
 
+  async sendOps(text) {
+    const chatId =
+      this.config.telegram.opsChatId ||
+      this.config.telegram.premiumChatId ||
+      this.config.telegram.freeChatId;
+    if (!this.enabled || !chatId) return false;
+    try {
+      await this.post(chatId, `🛡 *OPS*\n${text}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async send(alert) {
     if (!this.enabled) return false;
     let ok = false;
