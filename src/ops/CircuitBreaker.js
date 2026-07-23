@@ -45,10 +45,15 @@ class CircuitBreaker {
       this.openCount = 0;
       this.openMs = this.baseOpenMs;
       this.halfOpenProbe = false;
-      this.log.info(`breaker ${this.name} closed`);
+      this.log?.info?.(`breaker ${this.name} closed`);
     } else if (this.state === 'closed') {
       this.halfOpenProbe = false;
     }
+  }
+
+  /** Alias used by PriceRouter / Commit A call sites */
+  ok() {
+    this.success();
   }
 
   failure(err) {
@@ -60,11 +65,16 @@ class CircuitBreaker {
     }
     if (this.state === 'closed' && this._shouldOpen()) {
       this._trip();
-      this.log.warn(`breaker ${this.name} open`, {
+      this.log?.warn?.(`breaker ${this.name} open`, {
         error: err?.message,
         consecutive: this.consecutive,
       });
     }
+  }
+
+  /** Alias used by PriceRouter / Commit A call sites */
+  fail(err) {
+    this.failure(err);
   }
 
   _shouldOpen() {

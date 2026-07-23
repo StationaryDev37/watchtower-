@@ -1,51 +1,67 @@
+/**
+ * Single SQLite handle for the whole process. WAL, versioned SQL migrations, sync API.
+ */
+'use strict';
+
 const path = require('path');
 const fs = require('fs');
 
-/**
- * better-sqlite3 WAL store with migrations.
- */
+const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
+
 class Db {
   constructor(config, log) {
     this.config = config;
     this.log = log;
     this.db = null;
+    this.DB_PATH = null;
   }
 
   start() {
     const Database = require('better-sqlite3');
-    const dbPath = this.config.store.path;
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
+    this.DB_PATH =
+      process.env.DB_PATH ||
+      this.config?.store?.path ||
+      path.join(process.cwd(), 'data', 'watchtower.db');
+    fs.mkdirSync(path.dirname(this.DB_PATH), { recursive: true });
+
+    this.db = new Database(this.DB_PATH);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('temp_store = MEMORY');
-    this.migrate();
-    this.log.info('SQLite WAL ready', { path: dbPath });
-    return this;
-  }
+    this.db.pragma('mmap_size = 134217728'); // 128 MiB
+    this.db.pragma('foreign_keys = ON');
 
-  migrate() {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
+      CREATE TABLE IF NOT EXISTS _migrations (
+        version INTEGER PRIMARY KEY,
         applied_at INTEGER NOT NULL
       );
     `);
+    this.applyMigrations();
+    this.log?.info?.('SQLite WAL ready', { path: this.DB_PATH });
+    return this;
+  }
+
+  applyMigrations() {
+    if (!fs.existsSync(MIGRATIONS_DIR)) return;
+    const files = fs
+      .readdirSync(MIGRATIONS_DIR)
+      .filter((f) => /^\d{4}_.+\.sql$/.test(f))
+      .sort();
     const applied = new Set(
-      this.db.prepare('SELECT name FROM schema_migrations').all().map((r) => r.name)
+      this.db.prepare('SELECT version FROM _migrations').all().map((r) => r.version)
     );
-    for (const m of MIGRATIONS) {
-      if (applied.has(m.name)) continue;
-      const tx = this.db.transaction(() => {
-        this.db.exec(m.sql);
-        this.db
-          .prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)')
-          .run(m.name, Date.now());
-      });
-      tx();
-      this.log.info('Applied migration', { name: m.name });
-    }
+    const run = this.db.transaction((file) => {
+      const version = parseInt(file.slice(0, 4), 10);
+      if (applied.has(version)) return;
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+      this.db.exec(sql);
+      this.db
+        .prepare('INSERT INTO _migrations (version, applied_at) VALUES (?, ?)')
+        .run(version, Date.now());
+      this.log?.info?.('Applied migration', { version, file });
+    });
+    for (const f of files) run(f);
   }
 
   prepare(sql) {
@@ -56,79 +72,24 @@ class Db {
     return this.db.exec(sql);
   }
 
-  stop() {
-    if (this.db) {
-      try {
-        this.db.close();
-      } catch {
-        /* ignore */
-      }
-      this.db = null;
+  close() {
+    if (!this.db) return;
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      /* ignore */
     }
+    try {
+      this.db.close();
+    } catch {
+      /* ignore */
+    }
+    this.db = null;
+  }
+
+  stop() {
+    this.close();
   }
 }
-
-const MIGRATIONS = [
-  {
-    name: '001_alert_history',
-    sql: `
-      CREATE TABLE IF NOT EXISTS alert_history (
-        id INTEGER PRIMARY KEY,
-        ts INTEGER NOT NULL,
-        signal_type TEXT NOT NULL,
-        symbol TEXT,
-        tier TEXT NOT NULL,
-        conviction INTEGER,
-        payload_json TEXT NOT NULL,
-        entry_price REAL,
-        degraded INTEGER DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS ix_alert_ts ON alert_history(ts DESC);
-      CREATE INDEX IF NOT EXISTS ix_alert_sym_ts ON alert_history(symbol, ts DESC);
-    `,
-  },
-  {
-    name: '002_alert_outcomes',
-    sql: `
-      CREATE TABLE IF NOT EXISTS alert_outcomes (
-        alert_id INTEGER PRIMARY KEY REFERENCES alert_history(id),
-        ts_scored INTEGER NOT NULL,
-        p_15m REAL, p_1h REAL, p_4h REAL, p_24h REAL,
-        max_fav REAL, max_adv REAL,
-        hit_positive INTEGER
-      );
-    `,
-  },
-  {
-    name: '003_funnel_events',
-    sql: `
-      CREATE TABLE IF NOT EXISTS funnel_events (
-        id INTEGER PRIMARY KEY,
-        ts INTEGER NOT NULL,
-        session_id TEXT NOT NULL,
-        event TEXT NOT NULL,
-        variant TEXT,
-        meta_json TEXT
-      );
-      CREATE INDEX IF NOT EXISTS ix_funnel_session ON funnel_events(session_id);
-    `,
-  },
-  {
-    name: '004_subscribers',
-    sql: `
-      CREATE TABLE IF NOT EXISTS subscribers (
-        id INTEGER PRIMARY KEY,
-        stripe_customer TEXT UNIQUE,
-        telegram_user_id INTEGER UNIQUE,
-        tier TEXT NOT NULL,
-        status TEXT NOT NULL,
-        referral_code TEXT UNIQUE,
-        referred_by TEXT,
-        created_at INTEGER NOT NULL,
-        renews_at INTEGER
-      );
-    `,
-  },
-];
 
 module.exports = { Db };

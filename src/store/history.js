@@ -1,60 +1,83 @@
 /**
- * Alert history, outcomes, funnel — ground truth for ConvictionScorer.
+ * Alert history, outcomes, funnel — sync prepared statements on the shared Db.
  */
+'use strict';
+
 class History {
   constructor(db, log) {
-    this.db = db;
+    this.dbHandle = db; // Db instance
     this.log = log;
-    this._insertAlert = null;
-    this._insertFunnel = null;
+    this.db = null;
   }
 
   start() {
-    this._insertAlert = this.db.prepare(`
+    this.db = this.dbHandle.db || this.dbHandle;
+    this.insertAlert = this.db.prepare(`
       INSERT INTO alert_history
         (ts, signal_type, symbol, tier, conviction, payload_json, entry_price, degraded)
       VALUES
         (@ts, @signal_type, @symbol, @tier, @conviction, @payload_json, @entry_price, @degraded)
     `);
-    this._insertFunnel = this.db.prepare(`
+    this.insertOutcome = this.db.prepare(`
+      INSERT OR REPLACE INTO alert_outcomes
+        (alert_id, ts_scored, p_15m, p_1h, p_4h, p_24h, max_fav_bps, max_adv_bps, hit_positive)
+      VALUES
+        (@alert_id, @ts_scored, @p_15m, @p_1h, @p_4h, @p_24h, @max_fav_bps, @max_adv_bps, @hit_positive)
+    `);
+    this.pendingOutcomes = this.db.prepare(`
+      SELECT id, ts, symbol, entry_price, signal_type
+      FROM alert_history
+      WHERE entry_price IS NOT NULL
+        AND ts <= @cutoff
+        AND id NOT IN (SELECT alert_id FROM alert_outcomes)
+      ORDER BY ts ASC
+      LIMIT @lim
+    `);
+    this.insertFunnel = this.db.prepare(`
       INSERT INTO funnel_events (ts, session_id, event, variant, meta_json)
       VALUES (@ts, @session_id, @event, @variant, @meta_json)
     `);
-    this._insertOutcome = this.db.prepare(`
-      INSERT OR REPLACE INTO alert_outcomes
-        (alert_id, ts_scored, p_15m, p_1h, p_4h, p_24h, max_fav, max_adv, hit_positive)
-      VALUES
-        (@alert_id, @ts_scored, @p_15m, @p_1h, @p_4h, @p_24h, @max_fav, @max_adv, @hit_positive)
-    `);
+    this.count24hStmt = this.db.prepare(
+      `SELECT COUNT(*) AS c FROM alert_history WHERE ts >= ?`
+    );
     return this;
   }
 
   recordAlert(alert, { entryPrice = null, degraded = false } = {}) {
-    const info = this._insertAlert.run({
-      ts: Date.now(),
-      signal_type: alert.type || 'unknown',
-      symbol: alert.symbol || null,
-      tier: alert.tier || 'public',
+    // Accept either framework alert object or explicit history row
+    const row = {
+      ts: alert.ts ?? Date.now(),
+      signal_type: alert.signal_type || alert.type || 'unknown',
+      symbol: alert.symbol ?? null,
+      tier: normalizeTier(alert.tier),
       conviction: alert.conviction ?? null,
-      payload_json: JSON.stringify(alert).slice(0, 16000),
-      entry_price: entryPrice ?? alert.entryPrice ?? null,
+      payload_json:
+        typeof alert.payload_json === 'string'
+          ? alert.payload_json
+          : JSON.stringify(alert.payload ?? alert).slice(0, 16000),
+      entry_price: entryPrice ?? alert.entry_price ?? alert.entryPrice ?? null,
       degraded: degraded || alert.degraded ? 1 : 0,
-    });
+    };
+    const info = this.insertAlert.run(row);
     return info.lastInsertRowid;
   }
 
-  recordFunnel(event, { sessionId = 'anon', variant = null, meta = {} } = {}) {
-    this._insertFunnel.run({
-      ts: Date.now(),
-      session_id: sessionId,
-      event,
-      variant,
-      meta_json: JSON.stringify(meta).slice(0, 2000),
-    });
+  recordOutcome(o) {
+    this.insertOutcome.run(o);
   }
 
-  recordOutcome(row) {
-    this._insertOutcome.run(row);
+  listPendingOutcomes(cutoffMs, lim = 500) {
+    return this.pendingOutcomes.all({ cutoff: cutoffMs, lim });
+  }
+
+  recordFunnel(e) {
+    this.insertFunnel.run({
+      ts: e.ts ?? Date.now(),
+      session_id: e.session_id || e.sessionId || 'anon',
+      event: e.event,
+      variant: e.variant ?? null,
+      meta_json: e.meta || e.meta_json ? JSON.stringify(e.meta || e.meta_json) : null,
+    });
   }
 
   recentAlerts(limit = 20) {
@@ -68,15 +91,15 @@ class History {
 
   alertCount24h() {
     const since = Date.now() - 24 * 3600 * 1000;
-    return (
-      this.db.prepare(`SELECT COUNT(*) AS c FROM alert_history WHERE ts >= ?`).get(since)?.c || 0
-    );
+    return this.count24hStmt.get(since)?.c || 0;
   }
 
   coalesceRate24h() {
     const since = Date.now() - 24 * 3600 * 1000;
     const rows = this.db
-      .prepare(`SELECT payload_json FROM alert_history WHERE ts >= ? AND tier != 'public'`)
+      .prepare(
+        `SELECT payload_json FROM alert_history WHERE ts >= ? AND tier != 'public'`
+      )
       .all(since);
     if (!rows.length) return 0;
     let merged = 0;
@@ -103,27 +126,18 @@ class History {
       .all(limit);
   }
 
-  pendingOutcomeAlerts(maxAgeMs, minAgeMs) {
-    const now = Date.now();
-    return this.db
-      .prepare(
-        `SELECT h.id, h.ts, h.symbol, h.entry_price, h.payload_json
-         FROM alert_history h
-         LEFT JOIN alert_outcomes o ON o.alert_id = h.id
-         WHERE o.alert_id IS NULL
-           AND h.entry_price IS NOT NULL
-           AND h.ts <= ? AND h.ts >= ?
-         LIMIT 200`
-      )
-      .all(now - minAgeMs, now - maxAgeMs);
-  }
-
   status() {
     return {
       alerts24h: this.alertCount24h(),
       coalesceRate24h: this.coalesceRate24h(),
     };
   }
+}
+
+function normalizeTier(tier) {
+  if (tier === 'premium-only') return 'premium';
+  if (tier === 'premium_alpha' || tier === 'premium' || tier === 'public') return tier;
+  return 'public';
 }
 
 module.exports = { History };

@@ -8,7 +8,9 @@
     "dev": "DRY_RUN=true node watchtower.js",
     "health": "curl -s http://127.0.0.1:3847/health",
     "replay": "node scripts/replay.js",
-    "test": "node scripts/replay.js"
+    "test": "node scripts/replay.js",
+    "test:replay": "node scripts/replay.js",
+    "lint": "node -e \"require('./src/sources/RollingMAD'); require('./src/sources/PriceRouter'); require('./src/store/db'); require('./src/store/history'); console.log('lint-ok');\""
   },
   "engines": {
     "node": ">=18"
