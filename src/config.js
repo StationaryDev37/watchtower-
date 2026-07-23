@@ -50,6 +50,14 @@ function loadConfig() {
       maxWatchAddresses: num('MAX_WATCH_ADDRESSES', 25),
     },
     alertCooldownSec: num('ALERT_COOLDOWN_SEC', 900),
+    bus: {
+      coalesceMs: num('COALESCE_WINDOW_MS', 5000),
+      dedupMs: num('DEDUP_WINDOW_MS', 3000),
+      tgGlobalRate: num('TG_GLOBAL_RATE', 25),
+      tgPerChatRate: num('TG_PER_CHAT_RATE', 1),
+      maxQueue: num('BUS_MAX_QUEUE', 500),
+    },
+    // funding/liquidations/whale stay OFF unless explicitly listed
     signalsEnabled: list('SIGNALS_ENABLED', ['market']),
     coins: list('WATCH_COINS', ['bitcoin', 'ethereum', 'solana']).slice(
       0,
@@ -59,6 +67,58 @@ function loadConfig() {
       priceMovePct: num('PRICE_MOVE_PCT', 3),
       volumeSpikePct: num('VOLUME_SPIKE_PCT', 40),
       whaleMinAmount: num('WHALE_MIN_AMOUNT', 1000),
+    },
+    price: {
+      universe: required('SYMBOLS_UNIVERSE', 'auto') || 'auto',
+      universePath: required(
+        'UNIVERSE_PATH',
+        `${process.cwd()}/data/universe.json`
+      ),
+      symbols: list('PRICE_SYMBOLS', []),
+      maxSymbols: num('MAX_PRICE_SYMBOLS', 50),
+      binanceEnabled: bool('PRICE_BINANCE', true),
+      bybitEnabled: bool('PRICE_BYBIT', true),
+      fallbackPollSec: num('PRICE_FALLBACK_POLL_SEC', 20),
+      silentMs: num('PRICE_SILENT_MS', 5000),
+      windowSec: num('PRICE_WINDOW_SEC', 300),
+      zFire: num('Z_FIRE', 3.5),
+      zVolFire: num('Z_VOL_FIRE', 4.0),
+      noiseFloor: num('NOISE_FLOOR', 0.0005),
+    },
+    funding: {
+      symbols: list('FUNDING_UNIVERSE', list('FUNDING_SYMBOLS', [])),
+      pollSec: num('FUNDING_POLL_SEC', 30),
+      dFire: num('D_FIRE', 2.0),
+      oiMinUsd: num('OI_MIN_USD', 50_000_000),
+      flipAbs: num('FUNDING_FLIP_ABS', 0.0001),
+      flipLookback: num('FUNDING_FLIP_LOOKBACK', 3),
+    },
+    liquidations: {
+      symbols: list('LIQ_SYMBOLS', []),
+      binanceEnabled: bool('LIQ_BINANCE', true),
+      bybitEnabled: bool('LIQ_BYBIT', true),
+      cascadeUsd: num('CASCADE_USD', 5_000_000),
+      tauSec: num('CASCADE_TAU_S', 30),
+      softRatio: num('CASCADE_SOFT_RATIO', 0.25),
+      asym: num('CASCADE_ASYM', 4.0),
+    },
+    store: {
+      path: required('SQLITE_PATH', `${process.env.HOME || '/tmp'}/watchtower/watchtower.db`),
+    },
+    watchdog: {
+      softMb: num('RSS_SOFT_MB', 700),
+      hardMb: num('RSS_HARD_MB', 820),
+      fatalMb: num('RSS_FATAL_MB', 900),
+      intervalSec: num('WATCHDOG_INTERVAL_SEC', 10),
+    },
+    health: {
+      criticalDeps: list('HEALTH_CRITICAL_DEPS', ['stripe', 'telegram', 'priceRouter']),
+    },
+    conviction: {
+      enabled: bool('CONVICTION_ENABLED', true),
+      path: required('CONVICTION_PATH', `${process.cwd()}/data/conviction.json`),
+      trainCron: required('CONVICTION_TRAIN_CRON', '0 2 * * *') || '0 2 * * *',
+      minOutcomes: num('CONVICTION_MIN_OUTCOMES', 200),
     },
     coingecko: {
       baseUrl: required('COINGECKO_BASE_URL', 'https://api.coingecko.com/api/v3'),
@@ -72,6 +132,7 @@ function loadConfig() {
       botToken: required('TELEGRAM_BOT_TOKEN'),
       freeChatId: required('TELEGRAM_FREE_CHAT_ID') || required('TELEGRAM_CHAT_ID'),
       premiumChatId: required('TELEGRAM_PREMIUM_CHAT_ID'),
+      opsChatId: required('TELEGRAM_OPS_CHAT_ID'),
       inviteLink: required('TELEGRAM_PREMIUM_INVITE_LINK'),
     },
     twitter: {

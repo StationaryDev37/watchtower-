@@ -1,16 +1,6 @@
 /**
- * SignalPlugin — drop-in base for edge signals.
- *
- * v1 ships commodity adapters (market, whale) so the framework boots.
- * Money lives in *your* edge plugins: funding divergence, CEX flow,
- * cluster co-movement, new-pool snipes — drop a file here, no core edits.
- *
- * Contract:
- *   name: string
- *   async start()
- *   async stop()
- *   status(): object
- *   publish via this.bus.publish({ type, tier, key, title, body, fields?, url? })
+ * SignalPlugin — drop-in base.
+ * pause()/resume() used by Watchdog shedding.
  */
 class SignalPlugin {
   constructor(config, log, bus) {
@@ -18,18 +8,26 @@ class SignalPlugin {
     this.log = log;
     this.bus = bus;
     this.name = 'unnamed-signal';
+    this.paused = false;
+    this.priceRouter = null;
+    this.store = null;
+    this.history = null;
   }
 
   async start() {}
   async stop() {}
+  pause() {
+    this.paused = true;
+  }
+  resume() {
+    this.paused = false;
+  }
   status() {
-    return { running: false };
+    return { running: false, paused: this.paused };
   }
 
-  /**
-   * Helper: publish a structured alert. tier = public | premium | premium-only
-   */
   async emit(alert) {
+    if (this.paused) return { sent: false, reason: 'paused' };
     return this.bus.publish({
       tier: 'public',
       ...alert,

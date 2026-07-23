@@ -50,7 +50,8 @@ class HttpSurface {
     const path = url.pathname;
 
     if (req.method === 'GET' && (path === '/health' || path === '/status')) {
-      return this.json(res, 200, this.healthPayload());
+      const payload = this.healthPayload();
+      return this.json(res, payload.httpStatus || 200, payload);
     }
 
     if (req.method === 'GET' && path === '/') {
@@ -110,16 +111,22 @@ class HttpSurface {
   }
 
   healthPayload() {
+    const health = this.deps.health?.() || { ok: true, httpStatus: 200, status: 'healthy' };
     return {
-      status: 'ok',
+      status: health.status || (health.ok ? 'healthy' : 'unhealthy'),
+      httpStatus: health.httpStatus || (health.ok ? 200 : 503),
       service: 'watchtower',
-      architecture: 'single-source-framework',
+      architecture: 'pr2-architectural-pass',
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
+      critical: health.critical,
+      deps: health.deps,
       memory: {
         rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
         heapMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
       },
-      signals: this.deps.signals.status(),
+      priceRouter: this.deps.priceRouter?.status?.(),
+      history: this.deps.history?.status?.(),
+      signals: this.deps.signals?.status?.() || {},
       channels: this.deps.channels.status(),
       revenue: this.deps.revenue.getStats(),
       bus: this.deps.bus.getStats(),
