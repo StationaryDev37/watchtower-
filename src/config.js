@@ -55,7 +55,9 @@ function loadConfig() {
       dedupMs: num('DEDUP_WINDOW_MS', 3000),
       tgGlobalRate: num('TG_GLOBAL_RATE', 25),
       tgPerChatRate: num('TG_PER_CHAT_RATE', 1),
+      maxQueue: num('BUS_MAX_QUEUE', 500),
     },
+    // funding/liquidations/whale stay OFF unless explicitly listed
     signalsEnabled: list('SIGNALS_ENABLED', ['market']),
     coins: list('WATCH_COINS', ['bitcoin', 'ethereum', 'solana']).slice(
       0,
@@ -84,7 +86,7 @@ function loadConfig() {
       noiseFloor: num('NOISE_FLOOR', 0.0005),
     },
     funding: {
-      symbols: list('FUNDING_SYMBOLS', []),
+      symbols: list('FUNDING_UNIVERSE', list('FUNDING_SYMBOLS', [])),
       pollSec: num('FUNDING_POLL_SEC', 30),
       dFire: num('D_FIRE', 2.0),
       oiMinUsd: num('OI_MIN_USD', 50_000_000),
@@ -98,6 +100,7 @@ function loadConfig() {
       cascadeUsd: num('CASCADE_USD', 5_000_000),
       tauSec: num('CASCADE_TAU_S', 30),
       softRatio: num('CASCADE_SOFT_RATIO', 0.25),
+      asym: num('CASCADE_ASYM', 4.0),
     },
     store: {
       path: required('SQLITE_PATH', `${process.env.HOME || '/tmp'}/watchtower/watchtower.db`),

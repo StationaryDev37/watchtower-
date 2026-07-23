@@ -37,6 +37,7 @@ class WatchtowerFramework {
     this.liquidationsFeed = new LiquidationsFeed(config, log, { breakers: this.breakers });
     this.bus = new AlertBus(config, log);
     this.channels = new ChannelRegistry(config, log);
+    for (const ch of this.channels.channels) ch.bus = this.bus;
     this.signals = null;
     this.watchdog = null;
     this.health = null;
@@ -100,15 +101,24 @@ class WatchtowerFramework {
     await this.channels.start();
     await this.revenue.start();
 
-    this.bus.onAlert(async (alert) => {
+    // Commit B: channels subscribe to deliver; signals still publish/emit('alert').
+    const fanout = async (alert) => {
       const enriched = this.revenue.enrichAlert(alert);
       return this.channels.dispatch(enriched);
+    };
+    this.bus.onAlert(fanout);
+    this.bus.on('deliver', (env) => {
+      // EventEmitter path (tests / future plugins). onAlert handlers already cover prod fanout;
+      // only dual-fire when no handlers registered.
+      if (!this.bus.handlers.length) {
+        fanout(env).catch((err) => this.log.error('deliver fanout failed', { error: err.message }));
+      }
     });
 
     await this.signals.start();
     this.watchdog.start();
     this.http.start();
-    this.log.info('Watchtower live — ops + conviction scorer online');
+    this.log.info('Watchtower live — Commit B bus + funding/liq edge online');
   }
 
   async opsAlert(text) {

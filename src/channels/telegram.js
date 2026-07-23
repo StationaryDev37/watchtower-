@@ -2,11 +2,28 @@ const { ChannelPlugin } = require('./base');
 const { formatTelegram } = require('../templates/alerts');
 const axios = require('axios');
 
+/** Per-chat token bucket — ~1 msg/sec (Commit B). */
+const chatBuckets = new Map();
+function allowChat(chatId, rate = 1) {
+  const now = Date.now();
+  const b = chatBuckets.get(chatId) || { tokens: rate, last: now };
+  b.tokens = Math.min(rate, b.tokens + ((now - b.last) / 1000) * rate);
+  b.last = now;
+  if (b.tokens < 1) {
+    chatBuckets.set(chatId, b);
+    return false;
+  }
+  b.tokens -= 1;
+  chatBuckets.set(chatId, b);
+  return true;
+}
+
 class TelegramChannel extends ChannelPlugin {
   constructor(config, log) {
     super(config, log);
     this.name = 'telegram';
-    this.stats = { free: 0, premium: 0, errors: 0 };
+    this.stats = { free: 0, premium: 0, errors: 0, rateLimited: 0 };
+    this.bus = null; // optional, for requeue on per-chat throttle
   }
 
   get enabled() {
@@ -49,7 +66,7 @@ class TelegramChannel extends ChannelPlugin {
       body:
         alert.type === 'whale'
           ? 'Large transfer spotted on-chain. Unlock Premium for wallets, size, and tx link.'
-          : `${alert.body}\n\nFull signal + whale feed on Premium.`,
+          : `${alert.body}\n\nFull signal + funding/liq edge on Premium.`,
       fields: [],
       url: undefined,
     };
@@ -72,14 +89,22 @@ class TelegramChannel extends ChannelPlugin {
   async send(alert) {
     if (!this.enabled) return false;
     let ok = false;
+    const perChat = this.config.bus?.tgPerChatRate ?? 1;
 
     if (alert.tier !== 'premium-only') {
+      const chatId = this.config.telegram.freeChatId;
+      if (!allowChat(chatId, perChat)) {
+        this.stats.rateLimited += 1;
+        // Requeue via ingress path when bus is wired (Commit B).
+        this.bus?.emit?.('alert', alert);
+        return false;
+      }
       try {
-        const payload = alert.tier === 'premium' ? this.freeTeaser(alert) : alert;
-        await this.post(
-          this.config.telegram.freeChatId,
-          formatTelegram(this.config, payload, { premium: false })
-        );
+        const payload =
+          alert.tier === 'premium' || alert.tier === 'premium_alpha'
+            ? this.freeTeaser(alert)
+            : alert;
+        await this.post(chatId, formatTelegram(this.config, payload, { premium: false }));
         this.stats.free += 1;
         ok = true;
       } catch (err) {
@@ -90,13 +115,18 @@ class TelegramChannel extends ChannelPlugin {
 
     if (
       this.config.telegram.premiumChatId &&
-      (alert.tier === 'premium' || alert.tier === 'premium-only')
+      (alert.tier === 'premium' ||
+        alert.tier === 'premium-only' ||
+        alert.tier === 'premium_alpha')
     ) {
+      const chatId = this.config.telegram.premiumChatId;
+      if (!allowChat(`prem:${chatId}`, perChat)) {
+        this.stats.rateLimited += 1;
+        this.bus?.emit?.('alert', alert);
+        return ok;
+      }
       try {
-        await this.post(
-          this.config.telegram.premiumChatId,
-          formatTelegram(this.config, alert, { premium: true })
-        );
+        await this.post(chatId, formatTelegram(this.config, alert, { premium: true }));
         this.stats.premium += 1;
         ok = true;
       } catch (err) {

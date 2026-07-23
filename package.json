@@ -10,7 +10,7 @@
     "replay": "node scripts/replay.js",
     "test": "node scripts/replay.js",
     "test:replay": "node scripts/replay.js",
-    "lint": "node -e \"require('./src/sources/RollingMAD'); require('./src/sources/PriceRouter'); require('./src/store/db'); require('./src/store/history'); console.log('lint-ok');\""
+    "lint": "node -e \"['./src/sources/RollingMAD','./src/sources/PriceRouter','./src/sources/FundingRouter','./src/sources/LiquidationsFeed','./src/sources/CircuitBreaker','./src/bus/AlertBus','./src/store/db','./src/store/history'].forEach(require); console.log('lint-ok');\""
   },
   "engines": {
     "node": ">=18"

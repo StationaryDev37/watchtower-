@@ -1,3 +1,8 @@
+/**
+ * Funding signal — packages FundingRouter divergence / flip into AlertBus envelopes.
+ */
+'use strict';
+
 const { SignalPlugin } = require('./base');
 
 class FundingSignal extends SignalPlugin {
@@ -13,57 +18,77 @@ class FundingSignal extends SignalPlugin {
       this.log.warn('funding signal: FundingRouter not injected');
       return;
     }
-    this._div = (ev) => {
+    this._div = (e) => {
       if (this.paused) return;
       this.stats.divergence += 1;
-      const base = ev.symbol.replace(/USDT$/, '');
+      const base = e.symbol.replace(/USDT$/, '');
+      const d = e.deviation ?? e.maxD ?? 0;
       this.emit({
         type: 'funding',
-        tier: 'premium',
-        coalesceKey: `funding:${ev.symbol}`,
-        symbol: ev.symbol,
-        entryPrice: null,
+        signal_type: 'funding.divergence',
+        source: e.venue,
+        coalesceKey: e.symbol,
+        symbol: e.symbol,
+        tier: e.tier || 'premium',
+        lane: e.tier === 'premium_alpha' ? 'premium_alpha' : undefined,
+        ts: e.ts || Date.now(),
         features: {
+          x3: Math.abs(d),
+          funding_dev: Math.abs(d),
           z: 0,
           zVol: 0,
-          funding_dev: Math.abs(ev.maxD),
           liq_asym: 0,
         },
-        key: `funding:${ev.symbol}:${ev.venue}:${Math.round(Date.now() / 600000)}`,
-        title: `${base} funding ${ev.maxD > 0 ? 'rich' : 'cheap'} on ${ev.venue}`,
-        body: `${ev.venue} d=${ev.maxD.toFixed(2)}σ vs median ${(ev.rBar * 100).toFixed(4)}%`,
-        fields: ev.venues.map((v) => ({
+        key: `funding:${e.symbol}:${e.venue}:${Math.round((e.ts || Date.now()) / 600000)}`,
+        title: `${base} funding ${d > 0 ? 'rich' : 'cheap'} on ${e.venue}`,
+        body: `${e.venue} d=${Number(d).toFixed(2)}σ vs median ${((e.consensus ?? e.rBar) * 100).toFixed(4)}%`,
+        payload: e,
+        fields: (e.venues || []).map((v) => ({
           label: v.venue,
           value: `${(v.rate * 100).toFixed(4)}%`,
         })),
       }).catch((err) => this.log.error('funding emit failed', { error: err.message }));
     };
-    this._flip = (ev) => {
+
+    this._flip = (e) => {
       if (this.paused) return;
       this.stats.flips += 1;
-      const base = ev.symbol.replace(/USDT$/, '');
+      const base = e.symbol.replace(/USDT$/, '');
+      const from = e.prior ?? e.from;
+      const to = e.current ?? e.to;
       this.emit({
         type: 'funding',
-        tier: 'premium',
-        coalesceKey: `funding-flip:${ev.symbol}`,
-        symbol: ev.symbol,
-        features: { z: 0, zVol: 0, funding_dev: 1, liq_asym: 0 },
-        key: `funding-flip:${ev.symbol}:${ev.venue}`,
-        title: `${base} funding flipped on ${ev.venue}`,
-        body: `${(ev.from * 100).toFixed(4)}% → ${(ev.to * 100).toFixed(4)}%`,
-        fields: [{ label: 'Venue', value: ev.venue }],
+        signal_type: 'funding.flip',
+        source: e.venue || 'consensus',
+        coalesceKey: e.symbol,
+        symbol: e.symbol,
+        tier: e.tier || 'premium',
+        ts: e.ts || Date.now(),
+        features: {
+          x3: Math.abs(to - from) * 1e4,
+          funding_dev: 1,
+          z: 0,
+          zVol: 0,
+          liq_asym: 0,
+        },
+        key: `funding-flip:${e.symbol}:${e.venue || 'c'}`,
+        title: `${base} funding flipped`,
+        body: `${(from * 100).toFixed(4)}% → ${(to * 100).toFixed(4)}%`,
+        payload: e,
+        fields: [{ label: 'Venue', value: e.venue || 'consensus' }],
       }).catch((err) => this.log.error('funding flip emit failed', { error: err.message }));
     };
-    this.fundingRouter.on('divergence', this._div);
-    this.fundingRouter.on('flip', this._flip);
+
+    // Prefer namespaced Commit B events; legacy aliases still emitted by router.
+    this.fundingRouter.on('funding.divergence', this._div);
+    this.fundingRouter.on('funding.flip', this._flip);
     this.log.info('Funding signal subscribed');
   }
 
   async stop() {
-    if (this.fundingRouter) {
-      this.fundingRouter.off('divergence', this._div);
-      this.fundingRouter.off('flip', this._flip);
-    }
+    if (!this.fundingRouter) return;
+    this.fundingRouter.off('funding.divergence', this._div);
+    this.fundingRouter.off('funding.flip', this._flip);
   }
 
   status() {
@@ -73,6 +98,10 @@ class FundingSignal extends SignalPlugin {
       ...this.stats,
       feed: this.fundingRouter?.status?.(),
     };
+  }
+
+  metrics() {
+    return this.fundingRouter?.snapshot?.() || {};
   }
 }
 
