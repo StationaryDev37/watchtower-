@@ -112,7 +112,19 @@ function loadConfig() {
       intervalSec: num('WATCHDOG_INTERVAL_SEC', 10),
     },
     health: {
-      criticalDeps: list('HEALTH_CRITICAL_DEPS', ['stripe', 'telegram', 'priceRouter']),
+      criticalDeps: list(
+        'HEALTH_CRITICAL_DEPS',
+        (() => {
+          const sigs = list('SIGNALS_ENABLED', ['market']);
+          if (sigs.length === 1 && (sigs[0] === 'solana_whale' || sigs[0] === 'new_pool_watch')) {
+            return ['telegram', 'helius'];
+          }
+          if (sigs.every((s) => ['solana_whale', 'new_pool_watch'].includes(s))) {
+            return ['telegram', 'helius'];
+          }
+          return ['stripe', 'telegram', 'priceRouter'];
+        })()
+      ),
     },
     conviction: {
       enabled: bool('CONVICTION_ENABLED', true),
@@ -128,18 +140,37 @@ function loadConfig() {
       rpcUrl: required('ETH_RPC_URL'),
       watchAddresses: list('WATCH_ADDRESSES').slice(0, num('MAX_WATCH_ADDRESSES', 25)),
     },
+    helius: {
+      apiKey: required('HELIUS_KEY') || required('HELIUS_API_KEY'),
+      whaleSol: num('WHALE_SOL', 500),
+      megaSol: num('MEGA_SOL', 2000),
+      freeLagMs: num('PAID_LAG_MS', 5 * 60 * 1000),
+      freeFlushSec: num('SOL_FREE_FLUSH_SEC', 30),
+      digestMs: num('SOL_DIGEST_MS', 24 * 60 * 60 * 1000),
+      maxInflight: num('HELIUS_MAX_INFLIGHT', 4),
+      watchCpmm: bool('HELIUS_WATCH_CPMM', true),
+    },
+    score: {
+      paidThreshold: num('PUBLISH_THRESHOLD_PAID', 0.55),
+      freeThreshold: num('PUBLISH_THRESHOLD_FREE', 0.65),
+    },
     telegram: {
-      botToken: required('TELEGRAM_BOT_TOKEN'),
-      freeChatId: required('TELEGRAM_FREE_CHAT_ID') || required('TELEGRAM_CHAT_ID'),
-      premiumChatId: required('TELEGRAM_PREMIUM_CHAT_ID'),
+      botToken:
+        required('TELEGRAM_BOT_TOKEN') || required('TG_BOT_TOKEN'),
+      freeChatId:
+        required('TELEGRAM_FREE_CHAT_ID') ||
+        required('TELEGRAM_CHAT_ID') ||
+        required('TG_CHANNEL'),
+      premiumChatId:
+        required('TELEGRAM_PREMIUM_CHAT_ID') || required('TG_PAID_CHANNEL'),
       opsChatId: required('TELEGRAM_OPS_CHAT_ID'),
       inviteLink: required('TELEGRAM_PREMIUM_INVITE_LINK'),
     },
     twitter: {
-      apiKey: required('TWITTER_API_KEY'),
-      apiSecret: required('TWITTER_API_SECRET'),
-      accessToken: required('TWITTER_ACCESS_TOKEN'),
-      accessSecret: required('TWITTER_ACCESS_SECRET'),
+      apiKey: required('TWITTER_API_KEY') || required('X_API_KEY'),
+      apiSecret: required('TWITTER_API_SECRET') || required('X_API_SECRET'),
+      accessToken: required('TWITTER_ACCESS_TOKEN') || required('X_ACCESS_TOKEN'),
+      accessSecret: required('TWITTER_ACCESS_SECRET') || required('X_ACCESS_SECRET'),
     },
     discord: {
       webhookUrl: required('DISCORD_WEBHOOK_URL'),
@@ -201,6 +232,14 @@ function validateConfig(config) {
 
   if (!config.publicBaseUrl) {
     errors.push('PUBLIC_BASE_URL is required');
+  }
+
+  if (
+    (config.signalsEnabled.includes('solana_whale') ||
+      config.signalsEnabled.includes('new_pool_watch')) &&
+    !config.helius.apiKey
+  ) {
+    errors.push('Solana signals enabled but HELIUS_KEY is missing');
   }
 
   if (config.signalsEnabled.includes('whale')) {

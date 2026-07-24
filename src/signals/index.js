@@ -12,6 +12,8 @@ class SignalRegistry {
       exportNames: [
         'MarketSignal',
         'WhaleSignal',
+        'SolanaWhaleSignal',
+        'NewPoolWatchSignal',
         'FundingSignal',
         'LiquidationsSignal',
         'SignalPlugin',
@@ -27,6 +29,8 @@ class SignalRegistry {
       if (deps.liquidationsFeed) s.liquidationsFeed = deps.liquidationsFeed;
       if (deps.history) s.history = deps.history;
       if (deps.store) s.store = deps.store;
+      if (deps.dispatch) s.dispatch = deps.dispatch;
+      if (deps.settler) s.settler = deps.settler;
     }
     this.signals = all.filter((s) => enabled.has(s.name));
     const skipped = all.filter((s) => !enabled.has(s.name)).map((s) => s.name);

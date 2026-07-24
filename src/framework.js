@@ -16,6 +16,8 @@ const { LiquidationsFeed } = require('./sources/LiquidationsFeed');
 const { CircuitBreaker } = require('./ops/CircuitBreaker');
 const { Watchdog } = require('./ops/Watchdog');
 const { Health } = require('./ops/Health');
+const { Dispatch } = require('./core/dispatch');
+const { Settler } = require('./core/settler');
 
 class WatchtowerFramework {
   constructor(config, log) {
@@ -32,6 +34,8 @@ class WatchtowerFramework {
     this.db = new Db(config, log);
     this.history = null;
     this.scorer = null;
+    this.dispatch = null;
+    this.settler = null;
     this.priceRouter = new PriceRouter(config, log, { breakers: this.breakers });
     this.fundingRouter = new FundingRouter(config, log, { breakers: this.breakers });
     this.liquidationsFeed = new LiquidationsFeed(config, log, { breakers: this.breakers });
@@ -54,17 +58,26 @@ class WatchtowerFramework {
     this.bus.history = this.history;
     this.bus.scorer = this.scorer;
 
+    this.dispatch = new Dispatch(this.config, this.log, {
+      bus: this.bus,
+      history: this.history,
+    });
+    this.settler = new Settler(this.config, this.log, { history: this.history });
+
     this.signals = new SignalRegistry(this.config, this.log, this.bus, {
       priceRouter: this.priceRouter,
       fundingRouter: this.fundingRouter,
       liquidationsFeed: this.liquidationsFeed,
       history: this.history,
       store: this.db,
+      dispatch: this.dispatch,
+      settler: this.settler,
     });
 
     this.health = new Health(this.config, this.log, {
       breakers: this.breakers,
       priceRouter: this.priceRouter,
+      signals: () => this.signals,
     });
 
     this.watchdog = new Watchdog(this.config, this.log, {
@@ -91,15 +104,18 @@ class WatchtowerFramework {
     });
 
     this.log.info('Watchtower Framework starting', {
-      architecture: 'pr2-commit-c',
+      architecture: 'solana-whale-sessions',
       signals: this.config.signalsEnabled,
     });
 
-    await this.priceRouter.start();
-    await this.fundingRouter.start();
-    await this.liquidationsFeed.start();
+    const enabled = new Set(this.config.signalsEnabled);
+    if (enabled.has('market')) await this.priceRouter.start();
+    if (enabled.has('funding')) await this.fundingRouter.start();
+    if (enabled.has('liquidations')) await this.liquidationsFeed.start();
     await this.channels.start();
     await this.revenue.start();
+    this.dispatch.start();
+    this.settler.start();
 
     // Commit B: channels subscribe to deliver; signals still publish/emit('alert').
     const fanout = async (alert) => {
@@ -108,8 +124,6 @@ class WatchtowerFramework {
     };
     this.bus.onAlert(fanout);
     this.bus.on('deliver', (env) => {
-      // EventEmitter path (tests / future plugins). onAlert handlers already cover prod fanout;
-      // only dual-fire when no handlers registered.
       if (!this.bus.handlers.length) {
         fanout(env).catch((err) => this.log.error('deliver fanout failed', { error: err.message }));
       }
@@ -118,7 +132,9 @@ class WatchtowerFramework {
     await this.signals.start();
     this.watchdog.start();
     this.http.start();
-    this.log.info('Watchtower live — Commit B bus + funding/liq edge online');
+    this.log.info('Watchtower live — solana_whale sessions + Commit B edge online', {
+      signals: this.config.signalsEnabled,
+    });
   }
 
   async opsAlert(text) {
@@ -131,6 +147,8 @@ class WatchtowerFramework {
     this.log.info('Graceful shutdown — draining AlertBus');
     this.watchdog?.stop();
     this.http?.stop();
+    this.settler?.stop();
+    this.dispatch?.stop();
     await this.bus.drain();
     await this.signals?.stop();
     await this.channels.stop();
