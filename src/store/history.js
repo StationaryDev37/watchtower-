@@ -126,6 +126,159 @@ class History {
       .all(limit);
   }
 
+  // --- SignalSession + solana whale moat --------------------------------
+  upsertSession(session) {
+    const row = session.toRow ? session.toRow() : session;
+    this.db
+      .prepare(
+        `INSERT INTO sessions
+           (id, module, state, observed_at, scored_at, published_at, settled_at, payload, score_json, outcome_json)
+         VALUES
+           (@id, @module, @state, @observed_at, @scored_at, @published_at, @settled_at, @payload, @score_json, @outcome_json)
+         ON CONFLICT(id) DO UPDATE SET
+           state=excluded.state,
+           scored_at=excluded.scored_at,
+           published_at=excluded.published_at,
+           settled_at=excluded.settled_at,
+           payload=excluded.payload,
+           score_json=excluded.score_json,
+           outcome_json=excluded.outcome_json`
+      )
+      .run(row);
+  }
+
+  addReceipt(sessionId, channel, messageId = null) {
+    this.db
+      .prepare(
+        `INSERT INTO receipts (session_id, channel, posted_at, message_id) VALUES (?,?,?,?)`
+      )
+      .run(sessionId, channel, Date.now(), messageId);
+  }
+
+  listSessionsForSettle(publishedBefore, lim = 20) {
+    return this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE state = 'PUBLISHED'
+           AND published_at IS NOT NULL
+           AND published_at <= ?
+         ORDER BY published_at ASC LIMIT ?`
+      )
+      .all(publishedBefore, lim);
+  }
+
+  recordOutcomeSession(session) {
+    const o = session.outcome || {};
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO outcomes
+           (session_id, price_at_pub, price_at_15m, price_at_1h, price_at_24h, hit)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        session.id,
+        o.price_at_pub ?? null,
+        o.price_at_15m ?? null,
+        o.price_at_1h ?? null,
+        o.price_at_24h ?? null,
+        o.hit ?? null
+      );
+    this.upsertSession(session);
+  }
+
+  insertSolanaEvent({
+    ts,
+    sig,
+    wallet,
+    kind,
+    solAmount,
+    token,
+    mint,
+    dex,
+    side,
+    sessionId,
+  }) {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO solana_events
+             (ts,sig,wallet,kind,sol_amount,token,mint,dex,side,session_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?)`
+        )
+        .run(
+          ts,
+          sig,
+          wallet,
+          kind,
+          solAmount,
+          token,
+          mint || null,
+          dex,
+          side || null,
+          sessionId || null
+        );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  bumpWallet(wallet, ts, size = 0) {
+    if (!wallet) return;
+    this.db
+      .prepare(
+        `INSERT INTO wallet_stats (wallet, hits, size_sum, last_seen)
+         VALUES (?,1,?,?)
+         ON CONFLICT(wallet) DO UPDATE SET
+           hits = hits + 1,
+           size_sum = size_sum + excluded.size_sum,
+           last_seen = excluded.last_seen`
+      )
+      .run(wallet, size, ts);
+  }
+
+  bumpWalletResult(wallet, win) {
+    if (!wallet) return;
+    const col = win ? 'wins' : 'losses';
+    this.db
+      .prepare(`UPDATE wallet_stats SET ${col} = ${col} + 1 WHERE wallet = ?`)
+      .run(wallet);
+  }
+
+  markSolanaPosted(sig, lane) {
+    if (!sig) return;
+    const col = lane === 'free' ? 'posted_free' : 'posted_paid';
+    this.db.prepare(`UPDATE solana_events SET ${col}=1 WHERE sig=?`).run(sig);
+  }
+
+  dueSolanaFree(cutoff, limit = 5) {
+    return this.db
+      .prepare(
+        `SELECT * FROM solana_events WHERE posted_free=0 AND posted_paid=1 AND ts <= ? ORDER BY ts ASC LIMIT ?`
+      )
+      .all(cutoff, limit);
+  }
+
+  topWallets24h(limit = 5) {
+    const since = Date.now() - 24 * 3600 * 1000;
+    return this.db
+      .prepare(
+        `SELECT wallet, hits, wins, losses FROM wallet_stats
+         WHERE last_seen > ? ORDER BY hits DESC LIMIT ?`
+      )
+      .all(since, limit);
+  }
+
+  recentSimilarCount(module, windowMs = 15 * 60_000) {
+    const since = Date.now() - windowMs;
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM sessions WHERE module = ? AND observed_at >= ?`
+      )
+      .get(module, since);
+    return row?.c || 0;
+  }
+
   status() {
     return {
       alerts24h: this.alertCount24h(),

@@ -109,5 +109,69 @@ setTimeout(() => {
     process.exit(3);
   }
   console.log('bus replay OK — deliver=1 coalesced=1');
+
+  // --- 3) Score vector -------------------------------------------------
+  const {
+    score,
+    magnitudeFromSol,
+    PUBLISH_THRESHOLD_PAID,
+    PUBLISH_THRESHOLD_FREE,
+  } = require('../src/core/score');
+  const s = score({
+    confidence: 0.95,
+    magnitude: magnitudeFromSol(800, 500, 2000),
+    novelty: 0.9,
+    observedAt: Date.now(),
+  });
+  if (!(s.total >= PUBLISH_THRESHOLD_PAID)) {
+    console.error('score replay: expected paid publish', s);
+    process.exit(4);
+  }
+  const weak = score({
+    confidence: 0.5,
+    magnitude: 0.2,
+    novelty: 0.2,
+    urgency: 0.2,
+  });
+  if (weak.publishFree) {
+    console.error('score replay: weak signal should not clear free threshold', weak);
+    process.exit(5);
+  }
+  console.log(
+    `score replay OK — total=${s.total} paid≥${PUBLISH_THRESHOLD_PAID} free≥${PUBLISH_THRESHOLD_FREE}`
+  );
+
+  // --- 4) Session migration smoke --------------------------------------
+  const { Db } = require('../src/store/db');
+  const { History } = require('../src/store/history');
+  const { SignalSession } = require('../src/core/session');
+  const tmp = path.join('/tmp', `wt-session-${process.pid}.db`);
+  try {
+    fs.rmSync(tmp, { force: true });
+  } catch {
+    /* ignore */
+  }
+  const db = new Db({ store: { path: tmp } }, { info() {}, warn() {} }).start();
+  const hist = new History(db, { info() {} }).start();
+  const sess = new SignalSession({
+    module: 'solana_whale',
+    payload: { sig: 'abc', wallet: 'W', solAmount: 600, side: 'BUY', mint: 'Mint111' },
+  });
+  sess.markScored({ confidence: 0.9, magnitude: 0.7, novelty: 0.8 });
+  hist.upsertSession(sess);
+  hist.addReceipt(sess.id, 'tg_paid');
+  hist.bumpWallet('W', Date.now(), 600);
+  const n = hist.recentSimilarCount('solana_whale', 60_000);
+  if (n < 1) {
+    console.error('session smoke: expected recentSimilarCount>=1');
+    process.exit(6);
+  }
+  db.close();
+  try {
+    fs.rmSync(tmp, { force: true });
+  } catch {
+    /* ignore */
+  }
+  console.log('session smoke OK');
   process.exit(0);
 }, COAL_MS_LOCAL + 2500);
