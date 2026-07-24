@@ -279,6 +279,96 @@ class History {
     return row?.c || 0;
   }
 
+  /** Empirical CDF rank of solAmt vs trailing solana_events (0..1). */
+  magnitudePercentile(solAmt, lookback = 500) {
+    if (!(solAmt > 0)) return 0;
+    const rows = this.db
+      .prepare(
+        `SELECT sol_amount AS a FROM solana_events
+         WHERE sol_amount IS NOT NULL
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(lookback)
+      .map((r) => r.a)
+      .filter((a) => Number.isFinite(a));
+    if (rows.length < 8) {
+      // cold start — whale/mega anchors handled by caller
+      return null;
+    }
+    rows.sort((a, b) => a - b);
+    let lo = 0;
+    let hi = rows.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rows[mid] <= solAmt) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo / rows.length;
+  }
+
+  getSession(id) {
+    return this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) || null;
+  }
+
+  sessionMint(sessionId) {
+    const row = this.getSession(sessionId);
+    if (!row) return null;
+    try {
+      const p = JSON.parse(row.payload);
+      return p.mint || p.tokenMint || null;
+    } catch {
+      return null;
+    }
+  }
+
+  schedulePriceSamples(sessionId, samples) {
+    const stmt = this.db.prepare(
+      `INSERT OR IGNORE INTO price_samples (session_id, horizon, due_at) VALUES (?, ?, ?)`
+    );
+    const tx = this.db.transaction((rows) => {
+      for (const s of rows) stmt.run(sessionId, s.horizon, s.due_at);
+    });
+    tx(samples);
+  }
+
+  listDuePriceSamples(now, lim = 25) {
+    return this.db
+      .prepare(
+        `SELECT session_id, horizon, due_at FROM price_samples
+         WHERE sampled_at IS NULL AND due_at <= ?
+         ORDER BY due_at ASC LIMIT ?`
+      )
+      .all(now, lim);
+  }
+
+  markPriceSample(sessionId, horizon, price) {
+    this.db
+      .prepare(
+        `UPDATE price_samples SET sampled_at = ?, price = ? WHERE session_id = ? AND horizon = ?`
+      )
+      .run(Date.now(), price, sessionId, horizon);
+  }
+
+  getPriceSamples(sessionId) {
+    return this.db
+      .prepare(`SELECT * FROM price_samples WHERE session_id = ?`)
+      .all(sessionId);
+  }
+
+  insertPoolEvent({ ts, sig, dex, mintA, mintB, sessionId, raw }) {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO pool_events (ts, sig, dex, mint_a, mint_b, session_id, raw_json)
+           VALUES (?,?,?,?,?,?,?)`
+        )
+        .run(ts, sig, dex, mintA || null, mintB || null, sessionId || null, raw || null);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   status() {
     return {
       alerts24h: this.alertCount24h(),

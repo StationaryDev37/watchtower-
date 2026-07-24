@@ -1,12 +1,13 @@
 /**
- * solana_whale — Helius Raydium/Orca whale swaps.
- * Lifecycle: OBSERVED → SCORED → PUBLISHED (paid+X now, free after PAID_LAG_MS) → SETTLED.
+ * solana_whale — production Helius Raydium/Orca whale edge.
+ * Hardened WS, sig LRU, rolling magnitude percentile, SignalSession + real settlement.
  */
 'use strict';
 
 const axios = require('axios');
 const { SignalPlugin } = require('./base');
-const { ResilientWs } = require('../sources/ResilientWs');
+const { HeliusWs } = require('../sources/HeliusWs');
+const { SigCache } = require('../sources/SigCache');
 const { SignalSession } = require('../core/session');
 const { magnitudeFromSol } = require('../core/score');
 
@@ -20,10 +21,15 @@ class SolanaWhaleSignal extends SignalPlugin {
     this.ws = null;
     this.digestTimer = null;
     this.dispatch = null;
+    this.settler = null;
     this.degraded = false;
     this.seen = 0;
     this.alerts = 0;
     this.inspecting = 0;
+    this.dropped = 0;
+    this.sigCache = new SigCache(Number(process.env.SOL_SIG_CACHE || 8000));
+    this.queue = [];
+    this.pumping = false;
   }
 
   async start() {
@@ -31,11 +37,27 @@ class SolanaWhaleSignal extends SignalPlugin {
       this.log.info('solana_whale idle — set HELIUS_KEY to enable');
       return;
     }
-    if (!this.history) {
-      this.log.warn('solana_whale: history not injected — sessions will not persist');
-    }
 
-    this.connect();
+    this.ws = new HeliusWs({
+      name: 'helius-whale',
+      apiKey: this.config.helius.apiKey,
+      log: this.log,
+      programs: [RAYDIUM_AMM, ORCA_WHIRL],
+      silenceMs: Number(process.env.HELIUS_SILENCE_MS || 45_000),
+    });
+    this.ws.on('open', () => {
+      this.degraded = false;
+    });
+    this.ws.on('close', () => {
+      this.degraded = true;
+    });
+    this.ws.on('log', (ev) => {
+      if (!ev?.signature || ev.err) return;
+      if (!this.sigCache.check(ev.signature)) return;
+      this.seen += 1;
+      this.enqueue(ev.signature);
+    });
+    this.ws.start();
 
     this.digestTimer = setInterval(() => {
       this.postDigest().catch((err) =>
@@ -53,8 +75,9 @@ class SolanaWhaleSignal extends SignalPlugin {
 
   async stop() {
     if (this.digestTimer) clearInterval(this.digestTimer);
-    if (this.ws) this.ws.stop();
+    this.ws?.stop();
     this.ws = null;
+    this.queue = [];
   }
 
   status() {
@@ -64,73 +87,62 @@ class SolanaWhaleSignal extends SignalPlugin {
       seen: this.seen,
       alerts: this.alerts,
       inspecting: this.inspecting,
+      dropped: this.dropped,
+      queued: this.queue.length,
+      sigCache: this.sigCache.size(),
       socket: this.ws?.status?.(),
     };
   }
 
-  connect() {
-    const key = this.config.helius.apiKey;
-    this.ws = new ResilientWs({
-      name: 'helius-solana',
-      url: `wss://mainnet.helius-rpc.com/?api-key=${key}`,
-      log: this.log,
-      onOpen: (ws) => {
-        this.degraded = false;
-        this.log.info('helius ws open');
-        for (const pid of [RAYDIUM_AMM, ORCA_WHIRL]) {
-          ws.send(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              id: pid,
-              method: 'logsSubscribe',
-              params: [{ mentions: [pid] }, { commitment: 'confirmed' }],
-            })
-          );
-        }
-      },
-      onMessage: (msg) => {
-        const val = msg?.params?.result?.value;
-        if (!val?.signature || val.err) return;
-        this.seen += 1;
-        this.inspect(val.signature).catch((err) =>
+  enqueue(sig) {
+    const maxQ = Number(process.env.HELIUS_INSPECT_QUEUE || 200);
+    if (this.queue.length >= maxQ) {
+      this.dropped += 1;
+      this.queue.shift(); // drop oldest under pressure
+    }
+    this.queue.push(sig);
+    this.pump();
+  }
+
+  async pump() {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      const maxInflight = this.config.helius.maxInflight || 4;
+      while (this.queue.length && this.inspecting < maxInflight) {
+        const sig = this.queue.shift();
+        this.inspect(sig).catch((err) =>
           this.log.debug('inspect failed', { error: err.message })
         );
-      },
-    });
-    const origSchedule = this.ws.scheduleReconnect.bind(this.ws);
-    this.ws.scheduleReconnect = (...args) => {
-      this.degraded = true;
-      return origSchedule(...args);
-    };
-    this.ws.start();
+      }
+    } finally {
+      this.pumping = false;
+      if (this.queue.length && this.inspecting < (this.config.helius.maxInflight || 4)) {
+        setImmediate(() => this.pump());
+      }
+    }
   }
 
   async inspect(sig) {
-    if (this.inspecting >= this.config.helius.maxInflight) return;
     this.inspecting += 1;
     try {
-      const { data } = await axios.post(
-        `https://api.helius.xyz/v0/transactions/?api-key=${this.config.helius.apiKey}`,
-        { transactions: [sig] },
-        { timeout: 15_000 }
-      );
-      const tx = Array.isArray(data) ? data[0] : null;
+      const tx = await this.fetchParsedTx(sig);
       if (!tx) return;
 
       const swap = tx.events?.swap;
       if (!swap) return;
 
-      const solIn = (swap.nativeInput?.amount || 0) / 1e9;
-      const solOut = (swap.nativeOutput?.amount || 0) / 1e9;
+      const solIn = Number(swap.nativeInput?.amount || 0) / 1e9;
+      const solOut = Number(swap.nativeOutput?.amount || 0) / 1e9;
       const solAmt = Math.max(solIn, solOut);
-      if (solAmt < this.config.helius.whaleSol) return;
+      if (!(solAmt >= this.config.helius.whaleSol)) return;
 
       const wallet = tx.feePayer;
-      const dex = tx.source || detectDex(tx) || 'UNKNOWN';
-      const mint =
-        swap.tokenOutputs?.[0]?.mint ||
-        swap.tokenInputs?.[0]?.mint ||
-        '';
+      const dex = classifyDex(tx);
+      const mintOut = swap.tokenOutputs?.[0]?.mint || '';
+      const mintIn = swap.tokenInputs?.[0]?.mint || '';
+      // Prefer non-SOL / non-stable as the "token" of interest when buying with SOL
+      const mint = solIn >= solOut ? mintOut || mintIn : mintIn || mintOut;
       const token = mint ? mint.slice(0, 8) : 'SOL pair';
       const side = solIn >= solOut ? 'BUY' : 'SELL';
 
@@ -145,26 +157,28 @@ class SolanaWhaleSignal extends SignalPlugin {
           solAmount: solAmt,
           side,
           kind: 'SWAP',
+          solIn,
+          solOut,
         },
       });
 
+      const pct = this.history?.magnitudePercentile?.(solAmt);
+      const magnitude =
+        pct != null
+          ? pct
+          : magnitudeFromSol(solAmt, this.config.helius.whaleSol, this.config.helius.megaSol);
       const recent = this.history?.recentSimilarCount?.('solana_whale', 15 * 60_000) || 0;
-      const novelty = Math.max(0, 1 - recent / 20);
+      const novelty = Math.max(0, 1 - recent / 25);
+
       session.markScored({
-        confidence: 0.95,
-        magnitude: magnitudeFromSol(
-          solAmt,
-          this.config.helius.whaleSol,
-          this.config.helius.megaSol
-        ),
+        confidence: 0.97,
+        magnitude,
         novelty,
         observedAt: session.observed_at,
       });
 
-      if (!session.score.publishPaid) {
-        this.history?.upsertSession?.(session);
-        return;
-      }
+      this.history?.upsertSession?.(session);
+      if (!session.score.publishPaid) return;
 
       const inserted = this.history?.insertSolanaEvent?.({
         ts: session.observed_at,
@@ -181,46 +195,65 @@ class SolanaWhaleSignal extends SignalPlugin {
       if (inserted === false) return;
 
       this.history?.bumpWallet?.(wallet, session.observed_at, solAmt);
-      this.history?.upsertSession?.(session);
       this.alerts += 1;
 
       const formatted = this.format(session);
       if (this.dispatch) {
         await this.dispatch.publish(session, formatted);
-        this.history?.markSolanaPosted?.(sig, 'paid');
       } else {
-        // Fallback without Dispatch: emit paid + X directly
         await this.emit({ ...formatted.paid, coalesceMs: 0 });
-        await this.emit({ ...formatted.x, coalesceMs: 0 });
+        if (formatted.x) await this.emit({ ...formatted.x, coalesceMs: 0 });
         session.markPublished();
         this.history?.upsertSession?.(session);
-        this.history?.markSolanaPosted?.(sig, 'paid');
       }
+      this.history?.markSolanaPosted?.(sig, 'paid');
+      this.settler?.schedule?.(session);
 
       this.log.info('ALERT solana_whale', {
-        sol: solAmt,
+        sol: Number(solAmt.toFixed(2)),
+        side,
         dex,
         wallet: short(wallet),
         score: session.score.total,
+        magnitude: Number(magnitude.toFixed(3)),
         session: session.id,
       });
     } finally {
       this.inspecting -= 1;
+      if (this.queue.length) setImmediate(() => this.pump());
     }
+  }
+
+  async fetchParsedTx(sig) {
+    const key = this.config.helius.apiKey;
+    const urls = [
+      `https://api.helius.xyz/v0/transactions/?api-key=${key}`,
+      `https://api.helius.xyz/v0/transactions?api-key=${key}`,
+    ];
+    for (const url of urls) {
+      try {
+        const { data } = await axios.post(url, { transactions: [sig] }, { timeout: 12_000 });
+        const tx = Array.isArray(data) ? data[0] : data;
+        if (tx) return tx;
+      } catch (err) {
+        this.log.debug('helius parse miss', { sig: short(sig), error: err.message });
+      }
+    }
+    return null;
   }
 
   format(session) {
     const p = session.payload;
     const mega = p.solAmount >= this.config.helius.megaSol;
     const title = mega
-      ? `MEGA WHALE · ${fmt(p.solAmount)} SOL`
-      : `WHALE · ${fmt(p.solAmount)} SOL`;
+      ? `MEGA WHALE · ${fmt(p.solAmount)} SOL ${p.side}`
+      : `WHALE · ${fmt(p.solAmount)} SOL ${p.side}`;
     const body = `${fmt(p.solAmount)} SOL ${p.side} on ${p.dex}. Wallet ${short(p.wallet)}.`;
     const fields = [
       { label: 'DEX', value: p.dex },
       { label: 'Side', value: p.side },
       { label: 'Wallet', value: p.wallet },
-      { label: 'Token', value: p.token },
+      { label: 'Mint', value: p.mint || 'n/a' },
       { label: 'SOL', value: fmt(p.solAmount) },
       { label: 'Score', value: String(session.score?.total ?? '') },
     ];
@@ -261,7 +294,7 @@ class SolanaWhaleSignal extends SignalPlugin {
             key: `sol:free:${p.sig}`,
             coalesceKey: `sol:free:${p.sig}`,
             title: `${title} (delayed)`,
-            body: `${body} Free tier is delayed — Premium is live.`,
+            body: `${body} Free tier delayed — Premium is live.`,
           }
         : null,
       x: {
@@ -271,7 +304,7 @@ class SolanaWhaleSignal extends SignalPlugin {
         key: `sol:x:${p.sig}`,
         coalesceKey: `sol:x:${p.sig}`,
         title: title.slice(0, 80),
-        body: `${fmt(p.solAmount)} SOL on ${p.dex}. ${url}`,
+        body: `${fmt(p.solAmount)} SOL ${p.side} on ${p.dex}. ${url}`,
       },
     };
   }
@@ -280,9 +313,13 @@ class SolanaWhaleSignal extends SignalPlugin {
     if (!this.history?.topWallets24h) return;
     const top = this.history.topWallets24h(5);
     if (!top.length) return;
-    const lines = top.map(
-      (r, i) => `${i + 1}. ${short(r.wallet)} — ${r.hits} whale swaps`
-    );
+    const lines = top.map((r, i) => {
+      const wr =
+        r.wins + r.losses > 0
+          ? ` · WR ${Math.round((r.wins / (r.wins + r.losses)) * 100)}%`
+          : '';
+      return `${i + 1}. ${short(r.wallet)} — ${r.hits} hits${wr}`;
+    });
     await this.emit({
       type: 'digest',
       signal_type: 'solana_whale.digest',
@@ -300,15 +337,18 @@ class SolanaWhaleSignal extends SignalPlugin {
   }
 }
 
-function detectDex(tx) {
+function classifyDex(tx) {
   const src = String(tx.source || '').toUpperCase();
   if (src.includes('RAYDIUM')) return 'RAYDIUM';
   if (src.includes('ORCA')) return 'ORCA';
-  return null;
+  const keys = (tx.accountData || []).map((a) => a.account).join(' ');
+  if (keys.includes(RAYDIUM_AMM)) return 'RAYDIUM';
+  if (keys.includes(ORCA_WHIRL)) return 'ORCA';
+  return src || 'UNKNOWN';
 }
 
 function short(w) {
-  return w ? `${w.slice(0, 4)}..${w.slice(-4)}` : '?';
+  return w ? `${String(w).slice(0, 4)}..${String(w).slice(-4)}` : '?';
 }
 
 function fmt(n) {

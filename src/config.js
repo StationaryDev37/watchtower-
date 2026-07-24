@@ -114,11 +114,16 @@ function loadConfig() {
     health: {
       criticalDeps: list(
         'HEALTH_CRITICAL_DEPS',
-        // solana-only deploys shouldn't require priceRouter
-        list('SIGNALS_ENABLED', ['market']).length === 1 &&
-          list('SIGNALS_ENABLED', ['market'])[0] === 'solana_whale'
-          ? ['telegram']
-          : ['stripe', 'telegram', 'priceRouter']
+        (() => {
+          const sigs = list('SIGNALS_ENABLED', ['market']);
+          if (sigs.length === 1 && (sigs[0] === 'solana_whale' || sigs[0] === 'new_pool_watch')) {
+            return ['telegram', 'helius'];
+          }
+          if (sigs.every((s) => ['solana_whale', 'new_pool_watch'].includes(s))) {
+            return ['telegram', 'helius'];
+          }
+          return ['stripe', 'telegram', 'priceRouter'];
+        })()
       ),
     },
     conviction: {
@@ -143,6 +148,7 @@ function loadConfig() {
       freeFlushSec: num('SOL_FREE_FLUSH_SEC', 30),
       digestMs: num('SOL_DIGEST_MS', 24 * 60 * 60 * 1000),
       maxInflight: num('HELIUS_MAX_INFLIGHT', 4),
+      watchCpmm: bool('HELIUS_WATCH_CPMM', true),
     },
     score: {
       paidThreshold: num('PUBLISH_THRESHOLD_PAID', 0.55),
@@ -228,8 +234,12 @@ function validateConfig(config) {
     errors.push('PUBLIC_BASE_URL is required');
   }
 
-  if (config.signalsEnabled.includes('solana_whale') && !config.helius.apiKey) {
-    errors.push('SIGNALS_ENABLED includes solana_whale but HELIUS_KEY is missing');
+  if (
+    (config.signalsEnabled.includes('solana_whale') ||
+      config.signalsEnabled.includes('new_pool_watch')) &&
+    !config.helius.apiKey
+  ) {
+    errors.push('Solana signals enabled but HELIUS_KEY is missing');
   }
 
   if (config.signalsEnabled.includes('whale')) {

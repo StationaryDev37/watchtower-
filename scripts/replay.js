@@ -141,10 +141,32 @@ setTimeout(() => {
     `score replay OK — total=${s.total} paid≥${PUBLISH_THRESHOLD_PAID} free≥${PUBLISH_THRESHOLD_FREE}`
   );
 
-  // --- 4) Session migration smoke --------------------------------------
+  // --- 4) Session + settlement + percentile smoke ---------------------------
   const { Db } = require('../src/store/db');
   const { History } = require('../src/store/history');
   const { SignalSession } = require('../src/core/session');
+  const { Settler } = require('../src/core/settler');
+  const { SigCache } = require('../src/sources/SigCache');
+  const { HeliusWs } = require('../src/sources/HeliusWs');
+  const { NewPoolWatchSignal } = require('../src/signals/new_pool_watch');
+
+  const cache = new SigCache(3);
+  if (!cache.check('a') || cache.check('a') || !cache.check('b') || !cache.check('c')) {
+    console.error('sigcache basic failed');
+    process.exit(7);
+  }
+  cache.check('d'); // evicts a
+  if (cache.has('a')) {
+    console.error('sigcache LRU eviction failed');
+    process.exit(8);
+  }
+  console.log('sigcache OK');
+
+  if (typeof HeliusWs !== 'function') {
+    console.error('HeliusWs missing');
+    process.exit(9);
+  }
+
   const tmp = path.join('/tmp', `wt-session-${process.pid}.db`);
   try {
     fs.rmSync(tmp, { force: true });
@@ -153,14 +175,92 @@ setTimeout(() => {
   }
   const db = new Db({ store: { path: tmp } }, { info() {}, warn() {} }).start();
   const hist = new History(db, { info() {} }).start();
+
+  // seed events for percentile
+  for (let i = 1; i <= 20; i++) {
+    hist.insertSolanaEvent({
+      ts: Date.now() - i * 1000,
+      sig: `sig${i}`,
+      wallet: `W${i}`,
+      kind: 'SWAP',
+      solAmount: i * 100,
+      token: 'TOK',
+      mint: 'So11111111111111111111111111111111111111112',
+      dex: 'RAYDIUM',
+      side: 'BUY',
+    });
+  }
+  const pct = hist.magnitudePercentile(1500);
+  if (!(pct > 0.5 && pct < 1)) {
+    console.error('percentile unexpected', pct);
+    process.exit(10);
+  }
+  console.log('percentile OK —', pct.toFixed(3));
+
+  const mint = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
   const sess = new SignalSession({
     module: 'solana_whale',
-    payload: { sig: 'abc', wallet: 'W', solAmount: 600, side: 'BUY', mint: 'Mint111' },
+    payload: { sig: 'abc', wallet: 'Wallet111', solAmount: 1500, side: 'BUY', mint },
   });
-  sess.markScored({ confidence: 0.9, magnitude: 0.7, novelty: 0.8 });
+  sess.markScored({ confidence: 0.9, magnitude: pct, novelty: 0.8 });
+  sess.markPublished();
   hist.upsertSession(sess);
   hist.addReceipt(sess.id, 'tg_paid');
-  hist.bumpWallet('W', Date.now(), 600);
+  hist.bumpWallet('Wallet111', Date.now(), 1500);
+
+  const settler = new Settler({}, { info() {}, debug() {} }, { history: hist });
+  settler.schedule(sess);
+  const samples = hist.getPriceSamples(sess.id);
+  if (samples.length !== 4) {
+    console.error('expected 4 horizons, got', samples.length);
+    process.exit(11);
+  }
+  const due = hist.listDuePriceSamples(Date.now() + 1000, 10);
+  if (!due.some((d) => d.horizon === 'pub')) {
+    console.error('pub sample not due');
+    process.exit(12);
+  }
+  hist.markPriceSample(sess.id, 'pub', 1.23);
+  hist.markPriceSample(sess.id, '15m', 1.3);
+  hist.markPriceSample(sess.id, '1h', 1.4);
+  // finalize via private path
+  settler._writeOutcome(sess.id, {
+    pub: { price: 1.23, sampled_at: Date.now() },
+    '15m': { price: 1.3, sampled_at: Date.now() },
+    '1h': { price: 1.4, sampled_at: Date.now() },
+  }, hist.getSession(sess.id));
+  const settled = hist.getSession(sess.id);
+  if (settled.state !== 'SETTLED') {
+    console.error('expected SETTLED', settled.state);
+    process.exit(13);
+  }
+  const outcome = JSON.parse(settled.outcome_json);
+  if (outcome.hit !== 1) {
+    console.error('BUY + up price should hit=1', outcome);
+    process.exit(14);
+  }
+  console.log('settlement OK — hit=1 bps=', outcome.bps);
+
+  const poolOk = hist.insertPoolEvent({
+    ts: Date.now(),
+    sig: 'poolsig1',
+    dex: 'RAYDIUM',
+    mintA: mint,
+    mintB: 'So11111111111111111111111111111111111111112',
+    sessionId: sess.id,
+    raw: '{}',
+  });
+  if (!poolOk) {
+    console.error('pool insert failed');
+    process.exit(15);
+  }
+  const pool = new NewPoolWatchSignal({ helius: { apiKey: null } }, { info() {}, warn() {} }, null);
+  if (pool.name !== 'new_pool_watch') {
+    console.error('new_pool_watch name mismatch');
+    process.exit(16);
+  }
+  console.log('new_pool_watch plugin OK');
+
   const n = hist.recentSimilarCount('solana_whale', 60_000);
   if (n < 1) {
     console.error('session smoke: expected recentSimilarCount>=1');

@@ -71,11 +71,13 @@ class WatchtowerFramework {
       history: this.history,
       store: this.db,
       dispatch: this.dispatch,
+      settler: this.settler,
     });
 
     this.health = new Health(this.config, this.log, {
       breakers: this.breakers,
       priceRouter: this.priceRouter,
+      signals: () => this.signals,
     });
 
     this.watchdog = new Watchdog(this.config, this.log, {
